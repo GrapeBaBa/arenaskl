@@ -69,13 +69,22 @@ impl Arena {
         let pointer = &mut self.buf[offset as usize] as *mut u8;
         pointer.cast()
     }
+
+    pub fn get_pointer_offset(&mut self, node: *const Node) -> u32 {
+        if node.is_null() {
+            return 0;
+        }
+
+        let zero = self.get_pointer_mut(0).as_const();
+        (node.addr() - zero.addr()) as u32
+    }
 }
 
 #[cfg(test)]
 mod tests {
     extern crate test;
 
-    use crate::arena::{Arena, ArenaError};
+    use crate::arena::{ALIGN4, Arena, ArenaError};
     use std::ptr::Unique;
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -135,5 +144,18 @@ mod tests {
             assert_eq!(u16::MAX as u32 * 10 + 1, a.as_ref().unwrap().size());
             assert_eq!(u32::MAX, a.as_ref().unwrap().capacity());
         }
+    }
+
+    #[test]
+    fn test_pointer_offset() {
+        let mut a = Arena::new(u32::MAX);
+        let (node1_offset, _) = a.alloc(u16::MAX as u32, ALIGN4, 1024).unwrap();
+        let node1_p = a.get_pointer_mut(node1_offset);
+        let exp_node1_offset = a.get_pointer_offset(node1_p);
+        assert_eq!(exp_node1_offset, node1_offset);
+        let (node2_offset, _) = a.alloc(u16::MAX as u32, ALIGN4, 1024).unwrap();
+        let node2_p = a.get_pointer_mut(node2_offset);
+        let exp_node2_offset = a.get_pointer_offset(node2_p);
+        assert_eq!(exp_node2_offset, node2_offset)
     }
 }

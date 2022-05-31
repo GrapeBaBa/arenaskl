@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 
 #[allow(dead_code)]
-const MAX_HEIGHT: usize = 20;
+pub const MAX_HEIGHT: usize = 20;
 const MAX_NODE_SIZE: usize = mem::size_of::<Node>();
 const LINK_SIZE: usize = mem::size_of::<Link>();
 
@@ -57,13 +57,6 @@ pub enum NodeError {
     CombinedKeyAndValueTooLarge(usize),
 }
 
-// pub struct Skiplist {
-//     arena: Arc<Arena>,
-//     head: *mut Node,
-//     tail: *mut Node,
-//     height: AtomicU32, // Current height. 1 <= height <= maxHeight. CAS.
-// }
-
 #[allow(dead_code)]
 impl Node {
     pub fn new_node(
@@ -94,9 +87,9 @@ impl Node {
         let node = Node::new_raw_node(arena, height, key_size as u32, value_size as u32)?;
 
         unsafe {
-            let key_buf = node.as_mut().unwrap().get_key(arena);
+            let key_buf = node.as_mut().unwrap().get_key_mut(arena);
             key_buf.copy_from_slice(key);
-            let value_buf = node.as_mut().unwrap().get_value(arena);
+            let value_buf = node.as_mut().unwrap().get_value_mut(arena);
             value_buf.copy_from_slice(value);
             Ok(node)
         }
@@ -129,11 +122,11 @@ impl Node {
         Ok(node)
     }
 
-    pub fn get_key<'a>(&'a self, arena: &'a mut Arena) -> &mut [u8] {
+    pub fn get_key_mut<'a>(&'a self, arena: &'a mut Arena) -> &mut [u8] {
         arena.get_bytes_mut(self.key_offset, self.key_size)
     }
 
-    pub fn get_value<'a>(&'a self, arena: &'a mut Arena) -> &mut [u8] {
+    pub fn get_value_mut<'a>(&'a self, arena: &'a mut Arena) -> &mut [u8] {
         arena.get_bytes_mut(self.key_offset + self.key_size, self.value_size)
     }
 
@@ -169,10 +162,10 @@ mod tests {
 
         unsafe {
             let raw_node = Node::new_raw_node(&mut a, 12, 1024, 2048).unwrap();
-            let key_offset = (*raw_node).key_offset;
-            let key_size = (*raw_node).key_size;
-            let value_size = (*raw_node).value_size;
-            let alloc_size = (*raw_node).alloc_size;
+            let key_offset = raw_node.as_mut().unwrap().key_offset;
+            let key_size = raw_node.as_mut().unwrap().key_size;
+            let value_size = raw_node.as_mut().unwrap().value_size;
+            let alloc_size = raw_node.as_mut().unwrap().alloc_size;
             let b = a.get_bytes_mut(4, alloc_size);
             assert_eq!(key_offset, u32::from_le_bytes(b[0..4].try_into().unwrap()));
             assert_eq!(key_size, u32::from_le_bytes(b[4..8].try_into().unwrap()));
@@ -196,7 +189,7 @@ mod tests {
                 &[1u8, 1u8, 1u8, 1u8],
                 &[1u8, 1u8, 1u8, 1u8, 1u8],
             )
-            .unwrap();
+                .unwrap();
             let key_offset = node.as_mut().unwrap().key_offset;
             let key_size = node.as_mut().unwrap().key_size;
             let value_size = node.as_mut().unwrap().value_size;
