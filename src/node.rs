@@ -6,19 +6,16 @@ use std::mem;
 use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 
-#[allow(dead_code)]
 pub const MAX_HEIGHT: usize = 20;
 const MAX_NODE_SIZE: usize = mem::size_of::<Node>();
 const LINK_SIZE: usize = mem::size_of::<Link>();
 
-#[allow(dead_code)]
 #[repr(C)]
 pub struct Link {
     prev_offset: AtomicU32,
     next_offset: AtomicU32,
 }
 
-#[allow(dead_code)]
 impl Link {
     pub fn new(prev_offset: AtomicU32, next_offset: AtomicU32) -> Link {
         Link {
@@ -30,16 +27,16 @@ impl Link {
 
 #[repr(C)]
 pub struct Node {
-    key_offset: u32,
-    key_size: u32,
-    value_size: u32,
-    alloc_size: u32,
+    pub(crate) key_offset: u32,
+    pub(crate) key_size: u32,
+    pub(crate) value_size: u32,
+    pub(crate) alloc_size: u32,
 
-    tower: [Link; MAX_HEIGHT as usize],
+    pub(crate) tower: [Link; MAX_HEIGHT as usize],
 }
 
 #[derive(Error, Debug, PartialEq)]
-#[allow(dead_code)]
+
 pub enum NodeError {
     #[error("node allocation failed because arena is full")]
     ArenaFull(ArenaError),
@@ -57,7 +54,6 @@ pub enum NodeError {
     CombinedKeyAndValueTooLarge(usize),
 }
 
-#[allow(dead_code)]
 impl Node {
     pub fn new_node(
         arena: &mut Arena,
@@ -189,7 +185,7 @@ mod tests {
                 &[1u8, 1u8, 1u8, 1u8],
                 &[1u8, 1u8, 1u8, 1u8, 1u8],
             )
-                .unwrap();
+            .unwrap();
             let key_offset = node.as_mut().unwrap().key_offset;
             let key_size = node.as_mut().unwrap().key_size;
             let value_size = node.as_mut().unwrap().value_size;

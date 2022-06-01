@@ -2,23 +2,20 @@ use crate::node::Node;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
-#[allow(dead_code)]
 pub const ALIGN4: u32 = 3;
 
 #[derive(Error, Debug, PartialEq)]
-#[allow(dead_code)]
+
 pub enum ArenaError {
     #[error("allocation failed because arena is full")]
     ArenaFull,
 }
 
-#[allow(dead_code)]
 pub struct Arena {
     n: AtomicU64,
-    buf: Vec<u8>,
+    pub(crate) buf: Vec<u8>,
 }
 
-#[allow(dead_code)]
 impl Arena {
     pub fn new(cap: u32) -> Arena {
         Arena {
@@ -84,7 +81,7 @@ impl Arena {
 mod tests {
     extern crate test;
 
-    use crate::arena::{ALIGN4, Arena, ArenaError};
+    use crate::arena::{Arena, ArenaError, ALIGN4};
     use std::ptr::Unique;
     use std::sync::{Arc, Barrier};
     use std::thread;

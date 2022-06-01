@@ -6,4 +6,4 @@
 
 pub mod arena;
 pub mod node;
-mod skl;
+pub mod skl;
