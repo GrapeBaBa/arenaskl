@@ -5,6 +5,7 @@ use crate::node::NodeError::{
 use std::mem;
 use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
+use crate::skl::InternalKey;
 
 pub const MAX_HEIGHT: usize = 20;
 const MAX_NODE_SIZE: usize = mem::size_of::<Node>();
@@ -12,8 +13,8 @@ const LINK_SIZE: usize = mem::size_of::<Link>();
 
 #[repr(C)]
 pub struct Link {
-    prev_offset: AtomicU32,
-    next_offset: AtomicU32,
+    pub(crate) prev_offset: AtomicU32,
+    pub(crate) next_offset: AtomicU32,
 }
 
 impl Link {
@@ -36,7 +37,6 @@ pub struct Node {
 }
 
 #[derive(Error, Debug, PartialEq)]
-
 pub enum NodeError {
     #[error("node allocation failed because arena is full")]
     ArenaFull(ArenaError),
@@ -58,14 +58,14 @@ impl Node {
     pub fn new_node(
         arena: &mut Arena,
         height: u32,
-        key: &[u8],
+        key: &InternalKey,
         value: &[u8],
     ) -> Result<*mut Node, NodeError> {
         if height < 1 || height > MAX_HEIGHT as u32 {
             return Err(InvalidHeight(height));
         }
 
-        let key_size = key.len();
+        let key_size = key.size();
         if key_size > u32::MAX as usize {
             return Err(KeyTooLarge(key_size));
         }
@@ -84,7 +84,7 @@ impl Node {
 
         unsafe {
             let key_buf = node.as_mut().unwrap().get_key_mut(arena);
-            key_buf.copy_from_slice(key);
+            key.encode(key_buf);
             let value_buf = node.as_mut().unwrap().get_value_mut(arena);
             value_buf.copy_from_slice(value);
             Ok(node)
@@ -151,6 +151,7 @@ impl Node {
 mod tests {
     use crate::arena::Arena;
     use crate::node::Node;
+    use crate::skl::{INTERNAL_KEY_KIND_SET, InternalKey};
 
     #[test]
     fn test_new_raw_node() {
@@ -163,12 +164,12 @@ mod tests {
             let value_size = raw_node.as_mut().unwrap().value_size;
             let alloc_size = raw_node.as_mut().unwrap().alloc_size;
             let b = a.get_bytes_mut(4, alloc_size);
-            assert_eq!(key_offset, u32::from_le_bytes(b[0..4].try_into().unwrap()));
-            assert_eq!(key_size, u32::from_le_bytes(b[4..8].try_into().unwrap()));
-            assert_eq!(value_size, u32::from_le_bytes(b[8..12].try_into().unwrap()));
+            assert_eq!(key_offset, u32::from_ne_bytes(b[0..4].try_into().unwrap()));
+            assert_eq!(key_size, u32::from_ne_bytes(b[4..8].try_into().unwrap()));
+            assert_eq!(value_size, u32::from_ne_bytes(b[8..12].try_into().unwrap()));
             assert_eq!(
                 alloc_size,
-                u32::from_le_bytes(b[12..16].try_into().unwrap())
+                u32::from_ne_bytes(b[12..16].try_into().unwrap())
             );
             assert_eq!(alloc_size, b.len() as u32)
         }
@@ -179,26 +180,30 @@ mod tests {
         let mut a = Arena::new(u32::MAX);
 
         unsafe {
+            let key = InternalKey::new(&[1u8, 1u8, 1u8, 1u8], 1, INTERNAL_KEY_KIND_SET);
             let node = Node::new_node(
                 &mut a,
                 12,
-                &[1u8, 1u8, 1u8, 1u8],
+                &key,
                 &[1u8, 1u8, 1u8, 1u8, 1u8],
             )
-            .unwrap();
+                .unwrap();
             let key_offset = node.as_mut().unwrap().key_offset;
             let key_size = node.as_mut().unwrap().key_size;
             let value_size = node.as_mut().unwrap().value_size;
             let alloc_size = node.as_mut().unwrap().alloc_size;
             let b = a.get_bytes_mut(4, alloc_size);
-            assert_eq!(key_offset, u32::from_le_bytes(b[0..4].try_into().unwrap()));
-            assert_eq!(key_size, u32::from_le_bytes(b[4..8].try_into().unwrap()));
-            assert_eq!(value_size, u32::from_le_bytes(b[8..12].try_into().unwrap()));
+            assert_eq!(key_offset, u32::from_ne_bytes(b[0..4].try_into().unwrap()));
+            assert_eq!(key_size, u32::from_ne_bytes(b[4..8].try_into().unwrap()));
+            assert_eq!(value_size, u32::from_ne_bytes(b[8..12].try_into().unwrap()));
             assert_eq!(
                 alloc_size,
-                u32::from_le_bytes(b[12..16].try_into().unwrap())
+                u32::from_ne_bytes(b[12..16].try_into().unwrap())
             );
-            assert_eq!(alloc_size, b.len() as u32)
+            assert_eq!(alloc_size, b.len() as u32);
+            let key = node.as_mut().unwrap().get_key_mut(&mut a);
+            let key = InternalKey::decode(key);
+            assert_eq!(vec![1u8, 1u8, 1u8, 1u8], key.user_key)
         }
     }
 }
