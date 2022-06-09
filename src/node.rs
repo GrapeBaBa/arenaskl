@@ -2,10 +2,10 @@ use crate::arena::{Arena, ArenaError, ALIGN4};
 use crate::node::NodeError::{
     ArenaFull, CombinedKeyAndValueTooLarge, InvalidHeight, KeyTooLarge, ValueTooLarge,
 };
+use crate::skl::InternalKey;
 use std::mem;
 use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
-use crate::skl::InternalKey;
 
 pub const MAX_HEIGHT: usize = 20;
 const MAX_NODE_SIZE: usize = mem::size_of::<Node>();
@@ -18,11 +18,23 @@ pub struct Link {
 }
 
 impl Link {
-    pub fn new(prev_offset: AtomicU32, next_offset: AtomicU32) -> Link {
+    pub fn empty() -> Link {
         Link {
-            prev_offset,
-            next_offset,
+            prev_offset: Default::default(),
+            next_offset: Default::default(),
         }
+    }
+
+    pub fn new(prev_offset: u32, next_offset: u32) -> Link {
+        Link {
+            prev_offset: AtomicU32::new(prev_offset),
+            next_offset: AtomicU32::new(next_offset),
+        }
+    }
+
+    pub fn init(&mut self, prev_offset: u32, next_offset: u32) {
+        self.prev_offset = AtomicU32::new(prev_offset);
+        self.next_offset = AtomicU32::new(next_offset);
     }
 }
 
@@ -134,16 +146,24 @@ impl Node {
         self.tower[h].prev_offset.load(Ordering::SeqCst)
     }
 
-    pub fn cas_next_offset(&self, h: usize, current: u32, new: u32) -> Result<u32, u32> {
-        self.tower[h]
-            .next_offset
-            .compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+    pub fn cas_next_offset(&self, h: usize, current: u32, new: u32) -> bool {
+        let res = self.tower[h].next_offset.compare_exchange(
+            current,
+            new,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        res.is_ok()
     }
 
-    pub fn cas_prev_offset(&self, h: usize, current: u32, new: u32) -> Result<u32, u32> {
-        self.tower[h]
-            .prev_offset
-            .compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+    pub fn cas_prev_offset(&self, h: usize, current: u32, new: u32) -> bool {
+        let res = self.tower[h].prev_offset.compare_exchange(
+            current,
+            new,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        res.is_ok()
     }
 }
 
@@ -151,7 +171,7 @@ impl Node {
 mod tests {
     use crate::arena::Arena;
     use crate::node::Node;
-    use crate::skl::{INTERNAL_KEY_KIND_SET, InternalKey};
+    use crate::skl::{InternalKey, INTERNAL_KEY_KIND_SET};
 
     #[test]
     fn test_new_raw_node() {
@@ -181,13 +201,7 @@ mod tests {
 
         unsafe {
             let key = InternalKey::new(&[1u8, 1u8, 1u8, 1u8], 1, INTERNAL_KEY_KIND_SET);
-            let node = Node::new_node(
-                &mut a,
-                12,
-                &key,
-                &[1u8, 1u8, 1u8, 1u8, 1u8],
-            )
-                .unwrap();
+            let node = Node::new_node(&mut a, 12, &key, &[1u8, 1u8, 1u8, 1u8, 1u8]).unwrap();
             let key_offset = node.as_mut().unwrap().key_offset;
             let key_size = node.as_mut().unwrap().key_size;
             let value_size = node.as_mut().unwrap().value_size;

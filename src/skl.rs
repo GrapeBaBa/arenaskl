@@ -1,11 +1,11 @@
-use std::fmt::Error;
 use crate::arena::Arena;
 use crate::node;
-use crate::node::{MAX_HEIGHT, Node, NodeError};
+use crate::node::{Node, NodeError, MAX_HEIGHT};
+use rand::RngCore;
 use std::lazy::SyncOnceCell;
 use std::ptr::Unique;
 use std::sync::atomic::{AtomicU32, Ordering};
-use rand::RngCore;
+use std::thread;
 use thiserror::Error;
 
 const P_VALUE: f64 = 1.0f64 / std::f64::consts::E;
@@ -34,7 +34,10 @@ pub const INTERNAL_KEY_KIND_INVALID: InternalKeyKind = 255;
 #[derive(Error, Debug, PartialEq)]
 pub enum SKLError {
     #[error(transparent)]
-    NodeError(#[from] NodeError)
+    NodeError(#[from] NodeError),
+
+    #[error("the key already exist")]
+    RecordExist,
 }
 
 #[derive(Clone)]
@@ -66,16 +69,15 @@ impl InternalKey {
 
     pub fn decode(encoded_key: &[u8]) -> InternalKey {
         let n = encoded_key.len() - INTERNAL_TRAILER_LEN;
-        let (user_key, trailer) =
-            if encoded_key.len() >= 8 {
-                (Vec::from(&encoded_key[..n]), u64::from_ne_bytes(encoded_key[n..].try_into().unwrap()))
-            } else {
-                (vec![], INTERNAL_KEY_KIND_INVALID as u64)
-            };
-        InternalKey {
-            user_key,
-            trailer,
-        }
+        let (user_key, trailer) = if encoded_key.len() >= 8 {
+            (
+                Vec::from(&encoded_key[..n]),
+                u64::from_ne_bytes(encoded_key[n..].try_into().unwrap()),
+            )
+        } else {
+            (vec![], INTERNAL_KEY_KIND_INVALID as u64)
+        };
+        InternalKey { user_key, trailer }
     }
 }
 
@@ -92,11 +94,17 @@ pub struct Skiplist {
 
 impl Skiplist {
     pub fn new(arena: &mut Arena) -> Result<Skiplist, SKLError> {
-        let head = Node::new_raw_node(arena, MAX_HEIGHT as u32, 0u32, 0u32).map_err(|e| SKLError::NodeError(e))?;
-        unsafe { head.as_mut().unwrap().key_offset = 0u32; }
+        let head = Node::new_raw_node(arena, MAX_HEIGHT as u32, 0u32, 0u32)
+            .map_err(SKLError::NodeError)?;
+        unsafe {
+            head.as_mut().unwrap().key_offset = 0u32;
+        }
 
-        let tail = Node::new_raw_node(arena, MAX_HEIGHT as u32, 0u32, 0u32).map_err(|e| SKLError::NodeError(e))?;
-        unsafe { tail.as_mut().unwrap().key_offset = 0u32; }
+        let tail = Node::new_raw_node(arena, MAX_HEIGHT as u32, 0u32, 0u32)
+            .map_err(SKLError::NodeError)?;
+        unsafe {
+            tail.as_mut().unwrap().key_offset = 0u32;
+        }
 
         let head_offset = arena.get_pointer_offset(head.as_const());
         let tail_offset = arena.get_pointer_offset(tail.as_const());
@@ -106,7 +114,6 @@ impl Skiplist {
                 tail.as_mut().unwrap().tower[i].prev_offset = AtomicU32::from(head_offset);
             }
         }
-
 
         let skl = Skiplist {
             arena: Unique::from(arena),
@@ -135,19 +142,27 @@ impl Skiplist {
         }
     }
 
-    pub fn height(&self) -> u32 { self.height.load(Ordering::SeqCst) }
+    pub fn height(&self) -> u32 {
+        self.height.load(Ordering::SeqCst)
+    }
 
-    pub fn arena(&self) -> Unique<Arena> { self.arena }
+    pub fn arena(&self) -> Unique<Arena> {
+        self.arena
+    }
 
-    pub fn size(&self) -> u32 { unsafe { self.arena.as_ref().size() } }
+    pub fn size(&self) -> u32 {
+        unsafe { self.arena.as_ref().size() }
+    }
 
     pub fn reset(&mut self, arena: &mut Arena) -> Result<(), SKLError> {
         let skl = Skiplist::new(arena)?;
-
-        unsafe {
-            *self = skl
-        }
+        *self = skl;
         Ok(())
+    }
+
+    pub fn add(&mut self, key: &InternalKey, value: &[u8]) -> Result<(), SKLError> {
+        let mut ins = Inserter::new();
+        self.add_internal(key, value, &mut ins)
     }
 
     pub fn find_splice(&mut self, key: &InternalKey, ins: &mut Inserter) -> bool {
@@ -155,7 +170,7 @@ impl Skiplist {
         let mut level: u32 = 0u32;
 
         let mut prev = self.head;
-        let mut is_exist: bool = false;
+        let mut found: bool = false;
         if ins.height < list_height {
             // Our cached height is less than the list height, which means there were
             // inserts that increased the height of the list. Recompute the splice from
@@ -165,41 +180,51 @@ impl Skiplist {
         } else {
             while level < list_height {
                 let spl = &ins.spl[level as usize];
-                if self.get_next_mut(spl.prev, level as usize).as_ptr() != spl.next.as_ptr() {
+                if self
+                    .get_next_mut(spl.prev.unwrap(), level as usize)
+                    .as_ptr()
+                    != spl.next.unwrap().as_ptr()
+                {
                     // One or more nodes have been inserted between the splice at this
                     // level.
                     level += 1;
                     continue;
                 }
-                if spl.prev.as_ptr() != self.head.as_ptr() && !self.key_is_after_node(spl.prev, key) {
+                if spl.prev.unwrap().as_ptr() != self.head.as_ptr()
+                    && !self.key_is_after_node(spl.prev.unwrap(), key)
+                {
                     // Key lies before splice.
                     level = list_height;
                     break;
                 }
-                if spl.next.as_ptr() != self.tail.as_ptr() && self.key_is_after_node(spl.next, key) {
+                if spl.next.unwrap().as_ptr() != self.tail.as_ptr()
+                    && self.key_is_after_node(spl.next.unwrap(), key)
+                {
                     // Key lies after splice.
                     level = list_height;
                     break;
                 }
                 // The splice brackets the key!
-                prev = spl.prev;
+                prev = spl.prev.unwrap();
                 break;
             }
         }
 
         for l in (0..=level - 1).rev() {
-            let (prev, mut next, found) = self.find_splice_for_level(key, l as usize, prev);
-            is_exist = found;
-            if next.as_ptr().is_null() {
-                next = self.tail;
-            }
-            ins.spl[l as usize] = Splice::new(prev, next);
+            let next;
+            (prev, next, found) = self.find_splice_for_level(key, l as usize, prev);
+            ins.spl[l as usize].init(prev, next);
         }
 
-        is_exist
+        found
     }
 
-    fn find_splice_for_level(&mut self, key: &InternalKey, level: usize, start: Unique<Node>) -> (Unique<Node>, Unique<Node>, bool) {
+    fn find_splice_for_level(
+        &mut self,
+        key: &InternalKey,
+        level: usize,
+        start: Unique<Node>,
+    ) -> (Unique<Node>, Unique<Node>, bool) {
         let mut prev = start;
         let mut found = false;
         let mut next: Unique<Node>;
@@ -212,7 +237,10 @@ impl Skiplist {
                     break;
                 }
                 let next_ref = next.as_ref();
-                let next_key = self.arena.as_mut().get_bytes_mut(next_ref.key_offset, next_ref.key_size);
+                let next_key = self
+                    .arena
+                    .as_mut()
+                    .get_bytes_mut(next_ref.key_offset, next_ref.key_size);
                 let n = next_ref.key_size as usize - 8;
                 let cmp = key.user_key.as_slice().cmp(&next_key[..n]);
                 if cmp.is_lt() {
@@ -242,16 +270,25 @@ impl Skiplist {
             }
         }
 
-
         (prev, next, found)
     }
 
-    fn new_node(&mut self, key: &InternalKey, value: &[u8]) -> Result<(Unique<Node>, u32), SKLError> {
+    fn new_node(
+        &mut self,
+        key: &InternalKey,
+        value: &[u8],
+    ) -> Result<(Unique<Node>, u32), SKLError> {
         let height = Skiplist::random_height();
-        let node = Node::new_node(unsafe { self.arena.as_mut() }, height, key, value).map_err(|e| SKLError::NodeError(e))?;
+        let node = Node::new_node(unsafe { self.arena.as_mut() }, height, key, value)
+            .map_err(SKLError::NodeError)?;
         let mut list_height = self.height();
         while height > list_height {
-            let res = self.height.compare_exchange(list_height, height, Ordering::SeqCst, Ordering::SeqCst);
+            let res = self.height.compare_exchange(
+                list_height,
+                height,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
             if res.is_ok() {
                 break;
             }
@@ -259,6 +296,154 @@ impl Skiplist {
         }
 
         Ok((Unique::new(node).unwrap(), height))
+    }
+
+    fn add_internal(
+        &mut self,
+        key: &InternalKey,
+        value: &[u8],
+        ins: &mut Inserter,
+    ) -> Result<(), SKLError> {
+        if self.find_splice(key, ins) {
+            // Found a matching node, but handle case where it's been deleted.
+            return Err(SKLError::RecordExist);
+        }
+
+        if self.testing {
+            // Add delay to make it easier to test race between this thread
+            // and another thread that sees the intermediate state between
+            // finding the splice and using it.
+            thread::yield_now();
+        }
+
+        let (node, height) = self.new_node(key, value)?;
+        let node_offset =
+            unsafe { self.arena.as_mut() }.get_pointer_offset(node.as_ptr().as_const());
+
+        // We always insert from the base level and up. After you add a node in base
+        // level, we cannot create a node in the level above because it would have
+        // discovered the node in the base level.
+        let mut found;
+        let mut invalidate_splice = false;
+        for i in 0..height as usize {
+            let mut prev = ins.spl[i].prev;
+            let mut next = ins.spl[i].next;
+
+            if prev.is_none() {
+                // New node increased the height of the skiplist, so assume that the
+                // new level has not yet been populated.
+                if next.is_some() {
+                    panic!("next is expected to be nil, since prev is nil")
+                }
+
+                prev = Some(self.head);
+                next = Some(self.tail);
+            }
+
+            // +----------------+     +------------+     +----------------+
+            // |      prev      |     |     nd     |     |      next      |
+            // | prevNextOffset |---->|            |     |                |
+            // |                |<----| prevOffset |     |                |
+            // |                |     | nextOffset |---->|                |
+            // |                |     |            |<----| nextPrevOffset |
+            // +----------------+     +------------+     +----------------+
+            //
+            // 1. Initialize prevOffset and nextOffset to point to prev and next.
+            // 2. CAS prevNextOffset to repoint from next to nd.
+            // 3. CAS nextPrevOffset to repoint from prev to nd.
+            unsafe {
+                loop {
+                    let prev_offset = self
+                        .arena
+                        .as_mut()
+                        .get_pointer_offset(prev.unwrap().as_ptr());
+                    let next_offset = self
+                        .arena
+                        .as_mut()
+                        .get_pointer_offset(next.unwrap().as_ptr());
+                    node.as_ptr().as_mut().unwrap().tower[i].init(prev_offset, next_offset);
+
+                    // Check whether next has an updated link to prev. If it does not,
+                    // that can mean one of two things:
+                    //   1. The thread that added the next node hasn't yet had a chance
+                    //      to add the prev link (but will shortly).
+                    //   2. Another thread has added a new node between prev and next.
+                    let next_prev_offset = next.unwrap().as_ref().prev_offset(i);
+                    if next_prev_offset != prev_offset {
+                        // Determine whether #1 or #2 is true by checking whether prev
+                        // is still pointing to next. As long as the atomic operations
+                        // have at least acquire/release semantics (no need for
+                        // sequential consistency), this works, as it is equivalent to
+                        // the "publication safety" pattern.
+                        let prev_next_offset = prev.unwrap().as_ref().next_offset(i);
+                        if prev_next_offset == next_offset {
+                            // Ok, case #1 is true, so help the other thread along by
+                            // updating the next node's prev link.
+                            next.unwrap().as_mut().cas_prev_offset(
+                                i,
+                                next_prev_offset,
+                                prev_offset,
+                            );
+                        }
+                    }
+
+                    if prev
+                        .unwrap()
+                        .as_mut()
+                        .cas_next_offset(i, next_offset, node_offset)
+                    {
+                        // Managed to insert nd between prev and next, so update the next
+                        // node's prev link and go to the next level.
+                        if self.testing {
+                            // Add delay to make it easier to test race between this thread
+                            // and another thread that sees the intermediate state between
+                            // setting next and setting prev.
+                            thread::yield_now()
+                        }
+
+                        next.unwrap()
+                            .as_mut()
+                            .cas_prev_offset(i, prev_offset, node_offset);
+                        break;
+                    }
+
+                    // CAS failed. We need to recompute prev and next. It is unlikely to
+                    // be helpful to try to use a different level as we redo the search,
+                    // because it is unlikely that lots of nodes are inserted between prev
+                    // and next.
+                    let (prev_opt, next_opt, is_exist) =
+                        self.find_splice_for_level(key, i, prev.unwrap());
+                    prev = Some(prev_opt);
+                    next = Some(next_opt);
+                    found = is_exist;
+                    if found {
+                        if i != 0 {
+                            panic!(
+                                "how can another thread have inserted a node at a non-base level?"
+                            )
+                        }
+
+                        return Err(SKLError::RecordExist);
+                    }
+                    invalidate_splice = true
+                }
+            }
+        }
+
+        // If we had to recompute the splice for a level, invalidate the entire
+        // cached splice.
+        if invalidate_splice {
+            ins.height = 0
+        } else {
+            // The splice was valid. We inserted a node between spl[i].prev and
+            // spl[i].next. Optimistically update spl[i].prev for use in a subsequent
+            // call to add.
+            for i in 0..height as usize {
+                ins.spl[i].prev = Some(node)
+            }
+        }
+
+        Ok(())
     }
 
     fn key_is_after_node(&mut self, node: Unique<Node>, key: &InternalKey) -> bool {
@@ -300,30 +485,60 @@ impl Skiplist {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Splice {
-    prev: Unique<Node>,
-    next: Unique<Node>,
+    pub(crate) prev: Option<Unique<Node>>,
+    pub(crate) next: Option<Unique<Node>>,
 }
 
 impl Splice {
+    pub fn empty() -> Splice {
+        Splice {
+            prev: None,
+            next: None,
+        }
+    }
+
     pub fn new(prev: Unique<Node>, next: Unique<Node>) -> Splice {
-        Splice { prev, next }
+        Splice {
+            prev: Some(prev),
+            next: Some(next),
+        }
+    }
+
+    pub fn init(&mut self, prev: Unique<Node>, next: Unique<Node>) {
+        self.prev = Some(prev);
+        self.next = Some(next);
     }
 }
 
 pub struct Inserter {
-    spl: [Splice; node::MAX_HEIGHT],
-    height: u32,
+    pub(crate) spl: [Splice; node::MAX_HEIGHT],
+    pub(crate) height: u32,
 }
 
+impl Inserter {
+    pub fn new() -> Inserter {
+        let spl = vec![Splice::empty(); MAX_HEIGHT];
+        Inserter {
+            spl: spl.try_into().unwrap(),
+            height: 0,
+        }
+    }
+}
+
+impl Default for Inserter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use std::mem::transmute;
-    use std::sync::atomic::Ordering;
     use crate::arena::Arena;
-    use crate::node::{MAX_HEIGHT, Node};
-    use crate::skl::{INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET, InternalKey, Skiplist};
+    use crate::node::MAX_HEIGHT;
+    use crate::skl::{InternalKey, Skiplist, INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_make_trailer() {
@@ -340,7 +555,10 @@ mod tests {
         assert_eq!(key.user_key.len(), 2);
         assert_eq!(key.user_key[0], 1u8);
         assert_eq!(key.user_key[1], 2u8);
-        assert_eq!(key.trailer, 3u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64);
+        assert_eq!(
+            key.trailer,
+            3u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64
+        );
     }
 
     #[test]
@@ -366,10 +584,24 @@ mod tests {
 
         let tail_p = skl.tail.as_ptr();
         let tail_offset = a.get_pointer_offset(tail_p);
-        unsafe { assert_eq!(skl.head.as_ref().tower[MAX_HEIGHT as usize - 1].next_offset.load(Ordering::Acquire), tail_offset) }
+        unsafe {
+            assert_eq!(
+                skl.head.as_ref().tower[MAX_HEIGHT as usize - 1]
+                    .next_offset
+                    .load(Ordering::Acquire),
+                tail_offset
+            )
+        }
         let head_p = skl.head.as_ptr();
         let head_offset = a.get_pointer_offset(head_p);
-        unsafe { assert_eq!(skl.tail.as_ref().tower[MAX_HEIGHT as usize - 1].prev_offset.load(Ordering::Acquire), head_offset) }
+        unsafe {
+            assert_eq!(
+                skl.tail.as_ref().tower[MAX_HEIGHT as usize - 1]
+                    .prev_offset
+                    .load(Ordering::Acquire),
+                head_offset
+            )
+        }
     }
 
     #[test]
