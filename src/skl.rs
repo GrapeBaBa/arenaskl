@@ -210,7 +210,7 @@ impl Skiplist {
             }
         }
 
-        for l in (0..=level - 1).rev() {
+        for l in (0..=(level as i32 - 1)).rev() {
             let next;
             (prev, next, found) = self.find_splice_for_level(key, l as usize, prev);
             ins.spl[l as usize].init(prev, next);
@@ -537,7 +537,10 @@ impl Default for Inserter {
 mod tests {
     use crate::arena::Arena;
     use crate::node::MAX_HEIGHT;
-    use crate::skl::{InternalKey, Skiplist, INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET};
+    use crate::skl::{
+        Inserter, InternalKey, SKLError, Skiplist, INTERNAL_KEY_KIND_DELETE,
+        INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET,
+    };
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -618,5 +621,83 @@ mod tests {
         let d = &mut c as *mut Arena;
         let _ = skl.reset(&mut c);
         assert_eq!(skl.arena.as_ptr(), d);
+    }
+
+    #[test]
+    fn test_basic_add() {
+        let mut a = Arena::new(u32::MAX);
+
+        let mut skl = Skiplist::new(&mut a).unwrap();
+        let key1 = InternalKey::new(&[1u8], 1u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key1, &[1u8]);
+        let res = skl.add(&key1, &[2u8]);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+        let key2 = InternalKey::new(&[2u8], 1u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key2, &[1u8]);
+        let key3 = InternalKey::new(&[1u8], 2u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key3, &[1u8]);
+        let res = skl.add(&key2, &[2u8]);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+        let res = skl.add(&key3, &[2u8]);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+
+        let key4 = InternalKey::new(&[3u8], 1u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key4, &[1u8]);
+        let key5 = InternalKey::new(&[4u8], 2u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key5, &[1u8]);
+        let key6 = InternalKey::new(&[5u8], 2u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key6, &[1u8]);
+
+        let res = skl.add(&key6, &[2u8]);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+    }
+
+    #[test]
+    fn test_inserter_add() {
+        let mut a = Arena::new(u32::MAX);
+
+        let mut skl = Skiplist::new(&mut a).unwrap();
+        let mut ins = Inserter::default();
+        let key3 = InternalKey::new(&[1u8], 2u64, INTERNAL_KEY_KIND_SET);
+        let key1 = InternalKey::new(&[1u8], 1u64, INTERNAL_KEY_KIND_SET);
+        let key2 = InternalKey::new(&[2u8], 1u64, INTERNAL_KEY_KIND_SET);
+        let key4 = InternalKey::new(&[3u8], 1u64, INTERNAL_KEY_KIND_SET);
+        let key5 = InternalKey::new(&[4u8], 2u64, INTERNAL_KEY_KIND_SET);
+        let key6 = InternalKey::new(&[5u8], 2u64, INTERNAL_KEY_KIND_SET);
+        let key7 = InternalKey::new(&[5u8], 2u64, INTERNAL_KEY_KIND_DELETE);
+        let _ = skl.add_internal(&key3, &[1u8], &mut ins);
+        let _ = skl.add_internal(&key1, &[1u8], &mut ins);
+        let _ = skl.add_internal(&key2, &[1u8], &mut ins);
+        let _ = skl.add_internal(&key4, &[1u8], &mut ins);
+        let _ = skl.add_internal(&key5, &[1u8], &mut ins);
+        let _ = skl.add_internal(&key6, &[1u8], &mut ins);
+        let _ = skl.add_internal(&key7, &[1u8], &mut ins);
+        let res = skl.add_internal(&key7, &[1u8], &mut ins);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+        let res = skl.add_internal(&key6, &[1u8], &mut ins);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+        let res = skl.add_internal(&key5, &[1u8], &mut ins);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+        let res = skl.add_internal(&key4, &[1u8], &mut ins);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+        let res = skl.add_internal(&key3, &[1u8], &mut ins);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+        let res = skl.add_internal(&key2, &[1u8], &mut ins);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+        let res = skl.add_internal(&key1, &[1u8], &mut ins);
+        assert!(res.is_err());
+        assert_eq!(SKLError::RecordExist, res.unwrap_err());
+        let key8 = InternalKey::new(&[5u8], 2u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add_internal(&key8, &[1u8], &mut ins);
     }
 }
