@@ -1,6 +1,8 @@
 use crate::arena::Arena;
+use crate::iterator::{Iter, ITER_POOL};
 use crate::node;
 use crate::node::{Node, NodeError, MAX_HEIGHT};
+use lifeguard::Recycled;
 use rand::RngCore;
 use std::lazy::SyncOnceCell;
 use std::ptr::Unique;
@@ -29,7 +31,10 @@ type InternalKeyKind = u8;
 
 pub const INTERNAL_KEY_KIND_DELETE: InternalKeyKind = 0;
 pub const INTERNAL_KEY_KIND_SET: InternalKeyKind = 1;
+pub const INTERNAL_KEY_KIND_MAX: InternalKeyKind = 21;
 pub const INTERNAL_KEY_KIND_INVALID: InternalKeyKind = 255;
+
+pub const INTERNAL_KEY_SEQ_NUM_MAX: u64 = (1 << 56) - 1;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum SKLError {
@@ -82,14 +87,14 @@ impl InternalKey {
 }
 
 pub struct Skiplist {
-    arena: Unique<Arena>,
-    head: Unique<Node>,
-    tail: Unique<Node>,
-    height: AtomicU32, // Current height. 1 <= height <= maxHeight. CAS.
+    pub(crate) arena: Unique<Arena>,
+    pub(crate) head: Unique<Node>,
+    pub(crate) tail: Unique<Node>,
+    pub(crate) height: AtomicU32, // Current height. 1 <= height <= maxHeight. CAS.
 
     // If set to true by tests, then extra delays are added to make it easier to
     // detect unusual race conditions.
-    testing: bool,
+    pub(crate) testing: bool,
 }
 
 impl Skiplist {
@@ -160,6 +165,15 @@ impl Skiplist {
         Ok(())
     }
 
+    pub fn iter<'a>(&self, lower: &'a [u8], upper: &'a [u8]) -> Recycled<'a, Iter> {
+        let mut iter = unsafe { ITER_POOL.with(|p| p.as_ptr().as_ref().unwrap().new()) };
+        iter.upper = Vec::from(upper);
+        iter.lower = Vec::from(lower);
+        iter.list = self;
+        iter.node = self.head.as_ptr();
+        iter
+    }
+
     pub fn add(&mut self, key: &InternalKey, value: &[u8]) -> Result<(), SKLError> {
         let mut ins = Inserter::new();
         self.add_internal(key, value, &mut ins)
@@ -211,7 +225,7 @@ impl Skiplist {
         }
 
         for l in (0..=(level as i32 - 1)).rev() {
-            let next;
+            let mut next: Unique<Node> = Unique::dangling();
             (prev, next, found) = self.find_splice_for_level(key, l as usize, prev);
             ins.spl[l as usize].init(prev, next);
         }
@@ -219,7 +233,7 @@ impl Skiplist {
         found
     }
 
-    fn find_splice_for_level(
+    pub(crate) fn find_splice_for_level(
         &mut self,
         key: &InternalKey,
         level: usize,
@@ -536,10 +550,11 @@ impl Default for Inserter {
 #[cfg(test)]
 mod tests {
     use crate::arena::Arena;
+    use crate::iterator::{Iter, ITER_POOL};
     use crate::node::MAX_HEIGHT;
     use crate::skl::{
         Inserter, InternalKey, SKLError, Skiplist, INTERNAL_KEY_KIND_DELETE,
-        INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET,
+        INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET, INTERNAL_KEY_SEQ_NUM_MAX,
     };
     use std::sync::atomic::Ordering;
 
@@ -567,7 +582,7 @@ mod tests {
     #[test]
     fn test_random_height() {
         let h = Skiplist::random_height();
-        assert!(h >= 1 && h <= 20)
+        assert!(h >= 1 && h <= 20);
     }
 
     #[test]
@@ -699,5 +714,20 @@ mod tests {
         assert_eq!(SKLError::RecordExist, res.unwrap_err());
         let key8 = InternalKey::new(&[5u8], 2u64, INTERNAL_KEY_KIND_SET);
         let _ = skl.add_internal(&key8, &[1u8], &mut ins);
+    }
+
+    #[test]
+    fn test_new_iter() {
+        let mut a = Arena::new(u32::MAX);
+
+        let skl_res = Skiplist::new(&mut a);
+        assert!(skl_res.is_ok());
+        let mut skl = skl_res.unwrap();
+        let iter = skl.iter(&[] as &[u8], &[] as &[u8]);
+        ITER_POOL.with_borrow(|p| assert_eq!(127, p.size()));
+        Iter::close(iter);
+        ITER_POOL.with_borrow(|p| assert_eq!(128, p.size()));
+
+        assert!(!skl.head.as_ptr().is_null())
     }
 }
