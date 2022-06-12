@@ -165,7 +165,7 @@ impl Skiplist {
         Ok(())
     }
 
-    pub fn iter<'a>(&self, lower: &'a [u8], upper: &'a [u8]) -> Recycled<'a, Iter> {
+    pub fn iter<'a>(&mut self, lower: &'a [u8], upper: &'a [u8]) -> Recycled<'a, Iter> {
         let mut iter = unsafe { ITER_POOL.with(|p| p.as_ptr().as_ref().unwrap().new()) };
         iter.upper = Vec::from(upper);
         iter.lower = Vec::from(lower);

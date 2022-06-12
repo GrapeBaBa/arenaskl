@@ -1,6 +1,7 @@
 use crate::node::Node;
 use crate::skl::{
-    InternalKey, SKLError, Skiplist, INTERNAL_KEY_KIND_MAX, INTERNAL_KEY_SEQ_NUM_MAX,
+    InternalKey, SKLError, Skiplist, INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_MAX,
+    INTERNAL_KEY_SEQ_NUM_MAX,
 };
 use lifeguard::{InitializeWith, Pool, Recycleable, Recycled};
 use std::borrow::BorrowMut;
@@ -15,7 +16,7 @@ use std::thread::LocalKey;
 thread_local!(pub static ITER_POOL:RefCell<Pool<Iter >> = RefCell::new(Pool::with_size_and_max(128, 2048)));
 
 pub struct Iter {
-    pub(crate) list: *const Skiplist,
+    pub(crate) list: *mut Skiplist,
     pub(crate) node: *const Node,
     pub(crate) key: InternalKey,
     pub(crate) lower: Vec<u8>,
@@ -28,7 +29,63 @@ impl Iter {
         drop(iter)
     }
 
-    pub fn seek_for_base_splice(&self, key: &[u8]) -> (Unique<Node>, Unique<Node>, bool) {
+    pub fn first(&mut self) -> (Unique<InternalKey>, &[u8]) {
+        unsafe {
+            self.node = self
+                .list
+                .as_mut()
+                .unwrap()
+                .get_next_mut(self.list.as_mut().unwrap().head, 0)
+                .as_ptr()
+                .as_const();
+        }
+        unsafe {
+            if self.node == self.list.as_ref().unwrap().tail.as_ptr() {
+                return (Unique::dangling(), &[] as &[u8]);
+            }
+        }
+        self.decode_key();
+        if !self.upper.is_empty() && self.upper.le(&self.key.user_key) {
+            unsafe {
+                self.node = self.list.as_ref().unwrap().tail.as_ptr().as_const();
+            }
+            unsafe {
+                return (Unique::dangling(), &[] as &[u8]);
+            }
+        }
+        (Unique::from(&mut self.key), self.value())
+    }
+
+    fn value(&self) -> &[u8] {
+        unsafe {
+            self.node
+                .as_mut()
+                .as_mut()
+                .unwrap()
+                .get_value_mut(self.list.as_mut().unwrap().arena.as_mut())
+        }
+    }
+
+    fn decode_key(&mut self) {
+        let b = unsafe {
+            self.list.as_mut().unwrap().arena.as_mut().get_bytes_mut(
+                self.node.as_ref().unwrap().key_offset,
+                self.node.as_ref().unwrap().key_size,
+            )
+        };
+        // This is a manual inline of base.DecodeInternalKey, because the Go compiler
+        // seems to refuse to automatically inline it currently.
+        let l = b.len() as isize - 8;
+        if l >= 0 {
+            self.key.trailer = u64::from_ne_bytes(b[l as usize..].try_into().unwrap());
+            self.key.user_key = Vec::from(&b[..l as usize]);
+        } else {
+            self.key.trailer = INTERNAL_KEY_KIND_INVALID as u64;
+            self.key.user_key = vec![];
+        }
+    }
+
+    fn seek_for_base_splice(&self, key: &[u8]) -> (Unique<Node>, Unique<Node>, bool) {
         let i_key = InternalKey::new(key, INTERNAL_KEY_SEQ_NUM_MAX, INTERNAL_KEY_KIND_MAX);
         let mut level = (unsafe { self.list.as_ref() }.unwrap().height() - 1) as usize;
 
@@ -98,7 +155,9 @@ impl InitializeWith<Iter> for Iter {
 #[cfg(test)]
 mod tests {
     use crate::arena::Arena;
-    use crate::skl::{InternalKey, SKLError, Skiplist, INTERNAL_KEY_KIND_SET};
+    use crate::skl::{
+        InternalKey, SKLError, Skiplist, INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET,
+    };
 
     #[test]
     fn test_seek_for_base_splice() {
@@ -155,6 +214,45 @@ mod tests {
                 2u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
                 u64::from_ne_bytes(next.as_ref().get_key_mut(&mut a)[1..9].try_into().unwrap())
             )
+        }
+    }
+
+    #[test]
+    fn test_first() {
+        let mut a = Arena::new(u32::MAX);
+
+        let mut skl = Skiplist::new(&mut a).unwrap();
+        let mut iter = skl.iter(&[] as &[u8], &[] as &[u8]);
+        let key1 = InternalKey::new(&[1u8], 4u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key1, &[1u8]);
+
+        let (prev, next, found) = iter.seek_for_base_splice(&[1u8]);
+        assert!(!found);
+        unsafe {
+            assert_eq!([1u8], next.as_ref().get_key_mut(&mut a)[0..1]);
+        }
+        unsafe {
+            assert_eq!(
+                4u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                u64::from_ne_bytes(next.as_ref().get_key_mut(&mut a)[1..9].try_into().unwrap())
+            )
+        }
+
+        iter.decode_key();
+        assert_eq!(INTERNAL_KEY_KIND_INVALID as u64, iter.key.trailer);
+
+        let (k, v) = iter.first();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                4u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(1u8, k.as_ref().user_key[0]);
         }
     }
 }
