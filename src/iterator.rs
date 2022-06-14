@@ -1,23 +1,18 @@
 use crate::node::Node;
 use crate::skl::{
-    InternalKey, SKLError, Skiplist, INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_MAX,
+    InternalKey, Skiplist, INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_MAX,
     INTERNAL_KEY_SEQ_NUM_MAX,
 };
 use lifeguard::{InitializeWith, Pool, Recycleable, Recycled};
-use std::borrow::BorrowMut;
 use std::cell::RefCell;
-use std::ops::{Deref, DerefMut};
-use std::ptr;
 use std::ptr::Unique;
-use std::sync::Arc;
-use std::thread::LocalKey;
 
 // thread_local!(pub static ITER_POOL:RefCell<Pool<InternalIter >> = panic!("!"));
 thread_local!(pub static ITER_POOL:RefCell<Pool<Iter >> = RefCell::new(Pool::with_size_and_max(128, 2048)));
 
 pub struct Iter {
-    pub(crate) list: *mut Skiplist,
-    pub(crate) node: *const Node,
+    pub(crate) list: Unique<Skiplist>,
+    pub(crate) node: Unique<Node>,
     pub(crate) key: InternalKey,
     pub(crate) lower: Vec<u8>,
     pub(crate) upper: Vec<u8>,
@@ -29,49 +24,176 @@ impl Iter {
         drop(iter)
     }
 
-    pub fn first(&mut self) -> (Unique<InternalKey>, &[u8]) {
+    // pub fn seek_ge(&mut self, key: &[u8], try_seek_using_next: bool) -> (Unique<InternalKey>, &[u8]) {
+    //     if try_seek_using_next {
+    //         unsafe {
+    //             if self.node == self.list.as_ref().unwrap().head.as_ptr() {
+    //                 return (Unique::dangling(), &[] as &[u8]);
+    //             }
+    //         }
+    //         let mut less = self.key.user_key.lt(key);
+    //         // Arbitrary constant. By measuring the seek cost as a function of the
+    //         // number of elements in the skip list, and fitting to a model, we
+    //         // could adjust the number of nexts based on the current size of the
+    //         // skip list.
+    //         let num_nexts = 5;
+    //         let i = 0;
+    //         while less && i < num_nexts {
+    //             let (k, _) = self.next();
+    //             if k.as_ref(). {
+    //                 // Iterator is done.
+    //                 return nil;, nil
+    //             }
+    //             less = it.list.cmp(it.key.UserKey, key) < 0
+    //         }
+    //         if !less {
+    //             return &it.key;, it.value()
+    //         }
+    //     }
+    //     _, it.nd, _ = it.seekForBaseSplice(key)
+    //     if it.nd == it.list.tail {
+    //         return nil;, nil
+    //     }
+    //     it.decodeKey()
+    //     if it.upper != nil && it.list.cmp(it.upper, it.key.UserKey) <= 0 {
+    //         it.nd = it.list.tail
+    //         return nil;, nil
+    //     }
+    //     return &it.key;, it.value()
+    // }
+
+    pub fn seek_lt(&mut self, key: &[u8]) -> (Unique<InternalKey>, &[u8]) {
+        // NB: the top-level Iterator has already adjusted key based on
+        // the upper-bound.
+        let (prev, _, _) = self.seek_for_base_splice(key);
+        self.node = prev;
         unsafe {
-            self.node = self
-                .list
-                .as_mut()
-                .unwrap()
-                .get_next_mut(self.list.as_mut().unwrap().head, 0)
-                .as_ptr()
-                .as_const();
+            if self.node.as_ptr() == self.list.as_ref().head.as_ptr() {
+                return (Unique::dangling(), &[] as &[u8]);
+            }
         }
+        self.decode_key();
+        if !self.lower.is_empty() && self.lower.gt(&self.key.user_key) {
+            unsafe {
+                self.node = self.list.as_ref().head;
+            }
+
+            return (Unique::dangling(), &[] as &[u8]);
+        }
+        (Unique::from(&mut self.key), self.value())
+    }
+
+    pub fn first(&mut self) -> Option<(Unique<InternalKey>, &[u8])> {
+        let skl = unsafe { self.list.as_mut() };
+        self.node = skl.get_next_mut(skl.head, 0);
+
         unsafe {
-            if self.node == self.list.as_ref().unwrap().tail.as_ptr() {
+            if self.node.as_ptr() == self.list.as_ref().tail.as_ptr() {
+                return None;
+            }
+        }
+        self.decode_key();
+        if !self.upper.is_empty() && self.upper.le(&self.key.user_key) {
+            unsafe {
+                self.node = self.list.as_ref().tail;
+            }
+
+            return None;
+        }
+        Some((Unique::from(&mut self.key), self.value()))
+    }
+
+    pub fn last(&mut self) -> Option<(Unique<InternalKey>, &[u8])> {
+        let skl = unsafe { self.list.as_mut() };
+
+        self.node = skl.get_prev_mut(skl.tail, 0);
+
+        unsafe {
+            if self.node.as_ptr() == self.list.as_ref().head.as_ptr() {
+                return None;
+            }
+        }
+        self.decode_key();
+        if !self.lower.is_empty() && self.lower.gt(&self.key.user_key) {
+            unsafe {
+                self.node = self.list.as_ref().head;
+            }
+
+            return None;
+        }
+        Some((Unique::from(&mut self.key), self.value()))
+    }
+
+    pub fn next(&mut self) -> (Unique<InternalKey>, &[u8]) {
+        unsafe {
+            self.node = self.list.as_mut().get_next_mut(self.node, 0);
+        }
+
+        unsafe {
+            if self.node.as_ptr() == self.list.as_ref().tail.as_ptr() {
                 return (Unique::dangling(), &[] as &[u8]);
             }
         }
         self.decode_key();
         if !self.upper.is_empty() && self.upper.le(&self.key.user_key) {
             unsafe {
-                self.node = self.list.as_ref().unwrap().tail.as_ptr().as_const();
+                self.node = self.list.as_ref().tail;
             }
-            unsafe {
-                return (Unique::dangling(), &[] as &[u8]);
-            }
+
+            return (Unique::dangling(), &[] as &[u8]);
         }
         (Unique::from(&mut self.key), self.value())
     }
 
-    fn value(&self) -> &[u8] {
+    pub fn prev(&mut self) -> (Unique<InternalKey>, &[u8]) {
+        unsafe {
+            self.node = self.list.as_mut().get_prev_mut(self.node, 0);
+        }
+
+        unsafe {
+            if self.node.as_ptr() == self.list.as_ref().head.as_ptr() {
+                return (Unique::dangling(), &[] as &[u8]);
+            }
+        }
+        self.decode_key();
+        if !self.lower.is_empty() && self.lower.gt(&self.key.user_key) {
+            unsafe {
+                self.node = self.list.as_ref().head;
+            }
+
+            return (Unique::dangling(), &[] as &[u8]);
+        }
+        (Unique::from(&mut self.key), self.value())
+    }
+
+    pub fn head(&self) -> bool {
+        unsafe { self.node.as_ptr() == self.list.as_ref().head.as_ptr() }
+    }
+
+    pub fn tail(&self) -> bool {
+        unsafe { self.node.as_ptr() == self.list.as_ref().tail.as_ptr() }
+    }
+
+    pub fn set_bounds(&mut self, lower: &[u8], upper: &[u8]) {
+        self.lower = Vec::from(lower);
+        self.upper = Vec::from(upper);
+    }
+
+    fn value(&mut self) -> &[u8] {
         unsafe {
             self.node
                 .as_mut()
-                .as_mut()
-                .unwrap()
-                .get_value_mut(self.list.as_mut().unwrap().arena.as_mut())
+                .get_value_mut(self.list.as_mut().arena.as_mut())
         }
     }
 
     fn decode_key(&mut self) {
         let b = unsafe {
-            self.list.as_mut().unwrap().arena.as_mut().get_bytes_mut(
-                self.node.as_ref().unwrap().key_offset,
-                self.node.as_ref().unwrap().key_size,
-            )
+            self.list
+                .as_mut()
+                .arena
+                .as_mut()
+                .get_bytes_mut(self.node.as_ref().key_offset, self.node.as_ref().key_size)
         };
         // This is a manual inline of base.DecodeInternalKey, because the Go compiler
         // seems to refuse to automatically inline it currently.
@@ -85,20 +207,18 @@ impl Iter {
         }
     }
 
-    fn seek_for_base_splice(&self, key: &[u8]) -> (Unique<Node>, Unique<Node>, bool) {
+    fn seek_for_base_splice(&mut self, key: &[u8]) -> (Unique<Node>, Unique<Node>, bool) {
         let i_key = InternalKey::new(key, INTERNAL_KEY_SEQ_NUM_MAX, INTERNAL_KEY_KIND_MAX);
-        let mut level = (unsafe { self.list.as_ref() }.unwrap().height() - 1) as usize;
+        let mut level = (unsafe { self.list.as_ref() }.height() - 1) as usize;
 
-        let mut prev = unsafe { self.list.as_ref() }.unwrap().head;
-        let mut next: Unique<Node> = Unique::dangling();
-        let mut found: bool = false;
+        let mut prev = unsafe { self.list.as_ref() }.head;
+        let mut next: Unique<Node>;
+        let mut found: bool;
         loop {
             unsafe {
                 (prev, next, found) = self
                     .list
                     .as_mut()
-                    .as_mut()
-                    .unwrap()
                     .find_splice_for_level(&i_key, level, prev);
             }
 
@@ -107,7 +227,7 @@ impl Iter {
                     // next is pointing at the target node, but we need to find previous on
                     // the bottom level.
                     unsafe {
-                        prev = self.list.as_mut().as_mut().unwrap().get_prev_mut(next, 0);
+                        prev = self.list.as_mut().get_prev_mut(next, 0);
                     }
                 }
                 break;
@@ -127,8 +247,8 @@ impl Iter {
 impl Recycleable for Iter {
     fn new() -> Self {
         Iter {
-            list: ptr::null_mut(),
-            node: ptr::null_mut(),
+            list: Unique::dangling(),
+            node: Unique::dangling(),
             key: InternalKey {
                 user_key: vec![],
                 trailer: 0,
@@ -139,8 +259,8 @@ impl Recycleable for Iter {
     }
 
     fn reset(&mut self) {
-        self.list = ptr::null_mut();
-        self.node = ptr::null_mut();
+        self.list = Unique::dangling();
+        self.node = Unique::dangling();
         self.lower.clear();
         self.upper.clear();
     }
@@ -164,7 +284,7 @@ mod tests {
         let mut a = Arena::new(u32::MAX);
 
         let mut skl = Skiplist::new(&mut a).unwrap();
-        let iter = skl.iter(&[] as &[u8], &[] as &[u8]);
+        let mut iter = skl.iter(&[] as &[u8], &[] as &[u8]);
         let key1 = InternalKey::new(&[1u8], 4u64, INTERNAL_KEY_KIND_SET);
         let _ = skl.add(&key1, &[1u8]);
 
@@ -218,13 +338,19 @@ mod tests {
     }
 
     #[test]
-    fn test_first() {
+    fn test_first_last() {
         let mut a = Arena::new(u32::MAX);
 
         let mut skl = Skiplist::new(&mut a).unwrap();
         let mut iter = skl.iter(&[] as &[u8], &[] as &[u8]);
         let key1 = InternalKey::new(&[1u8], 4u64, INTERNAL_KEY_KIND_SET);
         let _ = skl.add(&key1, &[1u8]);
+        let key3 = InternalKey::new(&[1u8], 3u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key3, &[1u8]);
+        let key4 = InternalKey::new(&[2u8], 5u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key4, &[1u8]);
+        let key2 = InternalKey::new(&[2u8], 4u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key2, &[2u8]);
 
         let (prev, next, found) = iter.seek_for_base_splice(&[1u8]);
         assert!(!found);
@@ -241,7 +367,7 @@ mod tests {
         iter.decode_key();
         assert_eq!(INTERNAL_KEY_KIND_INVALID as u64, iter.key.trailer);
 
-        let (k, v) = iter.first();
+        let (k, v) = iter.first().unwrap();
         unsafe {
             assert_eq!(1, k.as_ref().user_key.len());
         }
@@ -254,5 +380,23 @@ mod tests {
         unsafe {
             assert_eq!(1u8, k.as_ref().user_key[0]);
         }
+        assert_eq!(1, v.len());
+        assert_eq!(1u8, v[0]);
+
+        let (k, v) = iter.last().unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                4u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(2u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(2u8, v[0]);
     }
 }

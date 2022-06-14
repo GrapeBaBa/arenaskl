@@ -169,8 +169,8 @@ impl Skiplist {
         let mut iter = unsafe { ITER_POOL.with(|p| p.as_ptr().as_ref().unwrap().new()) };
         iter.upper = Vec::from(upper);
         iter.lower = Vec::from(lower);
-        iter.list = self;
-        iter.node = self.head.as_ptr();
+        iter.list = Unique::new(self as *mut Skiplist).unwrap();
+        iter.node = self.head;
         iter
     }
 
@@ -225,7 +225,7 @@ impl Skiplist {
         }
 
         for l in (0..=(level as i32 - 1)).rev() {
-            let mut next: Unique<Node> = Unique::dangling();
+            let next: Unique<Node>;
             (prev, next, found) = self.find_splice_for_level(key, l as usize, prev);
             ins.spl[l as usize].init(prev, next);
         }
@@ -554,7 +554,7 @@ mod tests {
     use crate::node::MAX_HEIGHT;
     use crate::skl::{
         Inserter, InternalKey, SKLError, Skiplist, INTERNAL_KEY_KIND_DELETE,
-        INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET, INTERNAL_KEY_SEQ_NUM_MAX,
+        INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET,
     };
     use std::sync::atomic::Ordering;
 
