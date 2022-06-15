@@ -24,43 +24,51 @@ impl Iter {
         drop(iter)
     }
 
-    // pub fn seek_ge(&mut self, key: &[u8], try_seek_using_next: bool) -> (Unique<InternalKey>, &[u8]) {
-    //     if try_seek_using_next {
-    //         unsafe {
-    //             if self.node == self.list.as_ref().unwrap().head.as_ptr() {
-    //                 return (Unique::dangling(), &[] as &[u8]);
-    //             }
-    //         }
-    //         let mut less = self.key.user_key.lt(key);
-    //         // Arbitrary constant. By measuring the seek cost as a function of the
-    //         // number of elements in the skip list, and fitting to a model, we
-    //         // could adjust the number of nexts based on the current size of the
-    //         // skip list.
-    //         let num_nexts = 5;
-    //         let i = 0;
-    //         while less && i < num_nexts {
-    //             let (k, _) = self.next();
-    //             if k.as_ref(). {
-    //                 // Iterator is done.
-    //                 return nil;, nil
-    //             }
-    //             less = it.list.cmp(it.key.UserKey, key) < 0
-    //         }
-    //         if !less {
-    //             return &it.key;, it.value()
-    //         }
-    //     }
-    //     _, it.nd, _ = it.seekForBaseSplice(key)
-    //     if it.nd == it.list.tail {
-    //         return nil;, nil
-    //     }
-    //     it.decodeKey()
-    //     if it.upper != nil && it.list.cmp(it.upper, it.key.UserKey) <= 0 {
-    //         it.nd = it.list.tail
-    //         return nil;, nil
-    //     }
-    //     return &it.key;, it.value()
-    // }
+    pub fn seek_ge(
+        &mut self,
+        key: &[u8],
+        try_seek_using_next: bool,
+    ) -> Option<(Unique<InternalKey>, &[u8])> {
+        if try_seek_using_next {
+            unsafe {
+                if self.node.as_ptr() == self.list.as_ref().tail.as_ptr() {
+                    return None;
+                }
+            }
+            let mut less = self.key.user_key.as_slice().lt(key);
+            // Arbitrary constant. By measuring the seek cost as a function of the
+            // number of elements in the skip list, and fitting to a model, we
+            // could adjust the number of nexts based on the current size of the
+            // skip list.
+            let num_nexts = 5;
+            let mut i = 0;
+            while less && i < num_nexts {
+                let res = self.next();
+                res?;
+                less = self.key.user_key.as_slice().lt(key);
+                i += 1;
+            }
+            if !less {
+                return Some((Unique::from(&mut self.key), self.value()));
+            }
+        }
+        let (_, next, _) = self.seek_for_base_splice(key);
+        self.node = next;
+        unsafe {
+            if self.node.as_ptr() == self.list.as_ref().tail.as_ptr() {
+                return None;
+            }
+        }
+        self.decode_key();
+        if !self.upper.is_empty() && self.upper.le(&self.key.user_key) {
+            unsafe {
+                self.node = self.list.as_ref().tail;
+            }
+
+            return None;
+        }
+        Some((Unique::from(&mut self.key), self.value()))
+    }
 
     pub fn seek_lt(&mut self, key: &[u8]) -> Option<(Unique<InternalKey>, &[u8])> {
         // NB: the top-level Iterator has already adjusted key based on
@@ -537,5 +545,95 @@ mod tests {
         }
         assert_eq!(1, v.len());
         assert_eq!(1u8, v[0]);
+    }
+
+    #[test]
+    fn test_seek() {
+        let mut a = Arena::new(u32::MAX);
+
+        let mut skl = Skiplist::new(&mut a).unwrap();
+        let mut iter = skl.iter(&[] as &[u8], &[] as &[u8]);
+        let key1 = InternalKey::new(&[1u8], 4u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key1, &[1u8]);
+        let key3 = InternalKey::new(&[1u8], 3u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key3, &[1u8]);
+        let key4 = InternalKey::new(&[2u8], 5u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key4, &[1u8]);
+        let key2 = InternalKey::new(&[2u8], 4u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key2, &[2u8]);
+
+        let (prev, next, found) = iter.seek_for_base_splice(&[1u8]);
+        assert!(!found);
+        unsafe {
+            assert_eq!([1u8], next.as_ref().get_key_mut(&mut a)[0..1]);
+        }
+        unsafe {
+            assert_eq!(
+                4u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                u64::from_ne_bytes(next.as_ref().get_key_mut(&mut a)[1..9].try_into().unwrap())
+            )
+        }
+        assert_eq!(prev.as_ptr(), skl.head.as_ptr());
+        iter.decode_key();
+        assert_eq!(INTERNAL_KEY_KIND_INVALID as u64, iter.key.trailer);
+
+        let (k, v) = iter.seek_lt(&[2u8]).unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                3u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(1u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(1u8, v[0]);
+
+        let res = iter.seek_lt(&[1u8]);
+        assert!(res.is_none());
+
+        let (k, v) = iter.seek_ge(&[2u8], true).unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                5u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(2u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(1u8, v[0]);
+
+        let res = iter.seek_ge(&[3u8], true);
+        assert!(res.is_none());
+
+        let (k, v) = iter.seek_ge(&[2u8], false).unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                5u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(2u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(1u8, v[0]);
+
+        let res = iter.seek_ge(&[3u8], false);
+        assert!(res.is_none());
+
+        assert!(iter.tail());
     }
 }

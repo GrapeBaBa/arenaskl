@@ -9,4 +9,5 @@ mod suites;
 criterion_main! {
     suites::bench_arena::benches,
     suites::bench_node::benches,
+    suites::bench_skl::benches,
 }
