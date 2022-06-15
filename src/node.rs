@@ -139,19 +139,19 @@ impl Node {
     }
 
     pub fn next_offset(&self, h: usize) -> u32 {
-        self.tower[h].next_offset.load(Ordering::SeqCst)
+        self.tower[h].next_offset.load(Ordering::Acquire)
     }
 
     pub fn prev_offset(&self, h: usize) -> u32 {
-        self.tower[h].prev_offset.load(Ordering::SeqCst)
+        self.tower[h].prev_offset.load(Ordering::Acquire)
     }
 
     pub fn cas_next_offset(&self, h: usize, current: u32, new: u32) -> bool {
         let res = self.tower[h].next_offset.compare_exchange(
             current,
             new,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
+            Ordering::AcqRel,
+            Ordering::Acquire,
         );
         res.is_ok()
     }
@@ -160,8 +160,8 @@ impl Node {
         let res = self.tower[h].prev_offset.compare_exchange(
             current,
             new,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
+            Ordering::AcqRel,
+            Ordering::Acquire,
         );
         res.is_ok()
     }

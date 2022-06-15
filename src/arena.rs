@@ -25,7 +25,7 @@ impl Arena {
     }
 
     pub fn size(&self) -> u32 {
-        let s = self.n.load(Ordering::SeqCst);
+        let s = self.n.load(Ordering::Acquire);
         if s > u32::MAX as u64 {
             u32::MAX
         } else {
@@ -39,7 +39,7 @@ impl Arena {
 
     pub fn alloc(&self, size: u32, align: u32, overflow: u32) -> Result<(u32, u32), ArenaError> {
         // Verify that the arena isn't already full.
-        let orig_size = self.n.load(Ordering::SeqCst);
+        let orig_size = self.n.load(Ordering::Acquire);
         if orig_size > self.buf.len().try_into().unwrap() {
             return Err(ArenaError::ArenaFull);
         }
@@ -47,8 +47,8 @@ impl Arena {
         // Pad the allocation with enough bytes to ensure the requested alignment.
         let padded = size + align;
 
-        self.n.fetch_add(padded as u64, Ordering::SeqCst);
-        let new_size = self.n.load(Ordering::SeqCst);
+        self.n.fetch_add(padded as u64, Ordering::AcqRel);
+        let new_size = self.n.load(Ordering::Acquire);
         if new_size + overflow as u64 > self.buf.len().try_into().unwrap() {
             return Err(ArenaError::ArenaFull);
         }

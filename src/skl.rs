@@ -148,7 +148,7 @@ impl Skiplist {
     }
 
     pub fn height(&self) -> u32 {
-        self.height.load(Ordering::SeqCst)
+        self.height.load(Ordering::Relaxed)
     }
 
     pub fn arena(&self) -> Unique<Arena> {
@@ -300,8 +300,8 @@ impl Skiplist {
             let res = self.height.compare_exchange(
                 list_height,
                 height,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::AcqRel,
+                Ordering::Acquire,
             );
             if res.is_ok() {
                 break;

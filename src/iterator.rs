@@ -62,14 +62,14 @@ impl Iter {
     //     return &it.key;, it.value()
     // }
 
-    pub fn seek_lt(&mut self, key: &[u8]) -> (Unique<InternalKey>, &[u8]) {
+    pub fn seek_lt(&mut self, key: &[u8]) -> Option<(Unique<InternalKey>, &[u8])> {
         // NB: the top-level Iterator has already adjusted key based on
         // the upper-bound.
         let (prev, _, _) = self.seek_for_base_splice(key);
         self.node = prev;
         unsafe {
             if self.node.as_ptr() == self.list.as_ref().head.as_ptr() {
-                return (Unique::dangling(), &[] as &[u8]);
+                return None;
             }
         }
         self.decode_key();
@@ -78,9 +78,9 @@ impl Iter {
                 self.node = self.list.as_ref().head;
             }
 
-            return (Unique::dangling(), &[] as &[u8]);
+            return None;
         }
-        (Unique::from(&mut self.key), self.value())
+        Some((Unique::from(&mut self.key), self.value()))
     }
 
     pub fn first(&mut self) -> Option<(Unique<InternalKey>, &[u8])> {
@@ -124,14 +124,15 @@ impl Iter {
         Some((Unique::from(&mut self.key), self.value()))
     }
 
-    pub fn next(&mut self) -> (Unique<InternalKey>, &[u8]) {
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<(Unique<InternalKey>, &[u8])> {
         unsafe {
             self.node = self.list.as_mut().get_next_mut(self.node, 0);
         }
 
         unsafe {
             if self.node.as_ptr() == self.list.as_ref().tail.as_ptr() {
-                return (Unique::dangling(), &[] as &[u8]);
+                return None;
             }
         }
         self.decode_key();
@@ -140,19 +141,19 @@ impl Iter {
                 self.node = self.list.as_ref().tail;
             }
 
-            return (Unique::dangling(), &[] as &[u8]);
+            return None;
         }
-        (Unique::from(&mut self.key), self.value())
+        Some((Unique::from(&mut self.key), self.value()))
     }
 
-    pub fn prev(&mut self) -> (Unique<InternalKey>, &[u8]) {
+    pub fn prev(&mut self) -> Option<(Unique<InternalKey>, &[u8])> {
         unsafe {
             self.node = self.list.as_mut().get_prev_mut(self.node, 0);
         }
 
         unsafe {
             if self.node.as_ptr() == self.list.as_ref().head.as_ptr() {
-                return (Unique::dangling(), &[] as &[u8]);
+                return None;
             }
         }
         self.decode_key();
@@ -161,9 +162,9 @@ impl Iter {
                 self.node = self.list.as_ref().head;
             }
 
-            return (Unique::dangling(), &[] as &[u8]);
+            return None;
         }
-        (Unique::from(&mut self.key), self.value())
+        Some((Unique::from(&mut self.key), self.value()))
     }
 
     pub fn head(&self) -> bool {
@@ -299,6 +300,7 @@ mod tests {
                 u64::from_ne_bytes(next.as_ref().get_key_mut(&mut a)[1..9].try_into().unwrap())
             )
         }
+        assert_eq!(prev.as_ptr(), skl.head.as_ptr());
         let res = skl.add(&key1, &[2u8]);
         assert!(res.is_err());
         assert_eq!(SKLError::RecordExist, res.unwrap_err());
@@ -326,6 +328,16 @@ mod tests {
 
         let (prev, next, found) = iter.seek_for_base_splice(&[5u8]);
         assert!(!found);
+
+        unsafe {
+            assert_eq!([4u8], prev.as_ref().get_key_mut(&mut a)[0..1]);
+        }
+        unsafe {
+            assert_eq!(
+                2u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                u64::from_ne_bytes(prev.as_ref().get_key_mut(&mut a)[1..9].try_into().unwrap())
+            )
+        }
         unsafe {
             assert_eq!([5u8], next.as_ref().get_key_mut(&mut a)[0..1]);
         }
@@ -363,7 +375,7 @@ mod tests {
                 u64::from_ne_bytes(next.as_ref().get_key_mut(&mut a)[1..9].try_into().unwrap())
             )
         }
-
+        assert_eq!(prev.as_ptr(), skl.head.as_ptr());
         iter.decode_key();
         assert_eq!(INTERNAL_KEY_KIND_INVALID as u64, iter.key.trailer);
 
@@ -398,5 +410,132 @@ mod tests {
         }
         assert_eq!(1, v.len());
         assert_eq!(2u8, v[0]);
+    }
+
+    #[test]
+    fn test_prev_next() {
+        let mut a = Arena::new(u32::MAX);
+
+        let mut skl = Skiplist::new(&mut a).unwrap();
+        let mut iter = skl.iter(&[] as &[u8], &[] as &[u8]);
+        let key1 = InternalKey::new(&[1u8], 4u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key1, &[1u8]);
+        let key3 = InternalKey::new(&[1u8], 3u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key3, &[1u8]);
+        let key4 = InternalKey::new(&[2u8], 5u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key4, &[1u8]);
+        let key2 = InternalKey::new(&[2u8], 4u64, INTERNAL_KEY_KIND_SET);
+        let _ = skl.add(&key2, &[2u8]);
+
+        let (prev, next, found) = iter.seek_for_base_splice(&[1u8]);
+        assert!(!found);
+        unsafe {
+            assert_eq!([1u8], next.as_ref().get_key_mut(&mut a)[0..1]);
+        }
+        unsafe {
+            assert_eq!(
+                4u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                u64::from_ne_bytes(next.as_ref().get_key_mut(&mut a)[1..9].try_into().unwrap())
+            )
+        }
+        assert_eq!(prev.as_ptr(), skl.head.as_ptr());
+        iter.decode_key();
+        assert_eq!(INTERNAL_KEY_KIND_INVALID as u64, iter.key.trailer);
+
+        let (k, v) = iter.first().unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                4u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(1u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(1u8, v[0]);
+
+        let (k, v) = iter.next().unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                3u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(1u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(1u8, v[0]);
+
+        let (k, v) = iter.next().unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                5u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(2u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(1u8, v[0]);
+
+        let (k, v) = iter.last().unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                4u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(2u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(2u8, v[0]);
+
+        let (k, v) = iter.prev().unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                5u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(2u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(1u8, v[0]);
+
+        let (k, v) = iter.prev().unwrap();
+        unsafe {
+            assert_eq!(1, k.as_ref().user_key.len());
+        }
+        unsafe {
+            assert_eq!(
+                3u64 * 2u64.pow(8) + INTERNAL_KEY_KIND_SET as u64,
+                k.as_ref().trailer
+            );
+        }
+        unsafe {
+            assert_eq!(1u8, k.as_ref().user_key[0]);
+        }
+        assert_eq!(1, v.len());
+        assert_eq!(1u8, v[0]);
     }
 }
