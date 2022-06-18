@@ -568,7 +568,6 @@ mod tests {
     };
     use std::ptr::Unique;
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, Barrier};
     use std::thread;
 
     const ARENA_SIZE: u32 = 1 << 20;
@@ -748,7 +747,7 @@ mod tests {
 
     #[test]
     fn test_concurrency_basic() {
-        let n = 30;
+        let n = 1000;
 
         for item in [false, true].iter().enumerate() {
             let (_, case) = item;
@@ -756,13 +755,8 @@ mod tests {
             skl.testing = true;
             let mut skl = Unique::from(&mut skl);
             let mut handles = Vec::with_capacity(n);
-            let barrier = Arc::new(Barrier::new(n));
             for j in 0..n {
-                let c = Arc::clone(&barrier);
                 handles.push(thread::spawn(move || unsafe {
-                    println!("before wait");
-                    c.wait();
-                    println!("after wait");
                     if *case {
                         let mut ins = Inserter::new();
                         let _ = ins.add(skl, &make_int_key(j), format!("{:05}", j).as_bytes());
@@ -779,14 +773,9 @@ mod tests {
                 handle.join().unwrap();
             }
 
-            let barrier1 = Arc::new(Barrier::new(n));
             let mut handles1 = Vec::with_capacity(n);
             for j in 0..n {
-                let c = Arc::clone(&barrier1);
                 handles1.push(thread::spawn(move || unsafe {
-                    println!("before wait");
-                    c.wait();
-                    println!("after wait");
                     let mut iter = skl.as_mut().iter(&[] as &[u8], &[] as &[u8]);
                     assert!(iter
                         .seek_ge(format!("{:05}", j).as_bytes(), false)
@@ -804,7 +793,7 @@ mod tests {
             while iter.next().is_some() {
                 res += 1;
             }
-            assert_eq!(30, res)
+            assert_eq!(1000, res)
         }
     }
 
