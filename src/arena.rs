@@ -1,11 +1,11 @@
 use crate::node::Node;
+use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 pub const ALIGN4: u32 = 3;
 
 #[derive(Error, Debug, PartialEq)]
-
 pub enum ArenaError {
     #[error("allocation failed because arena is full")]
     ArenaFull,
@@ -47,8 +47,7 @@ impl Arena {
         // Pad the allocation with enough bytes to ensure the requested alignment.
         let padded = size + align;
 
-        self.n.fetch_add(padded as u64, Ordering::AcqRel);
-        let new_size = self.n.load(Ordering::Acquire);
+        let new_size = self.n.fetch_add(padded as u64, Ordering::AcqRel) + padded as u64;
         if new_size + overflow as u64 > self.buf.len().try_into().unwrap() {
             return Err(ArenaError::ArenaFull);
         }
@@ -59,10 +58,16 @@ impl Arena {
     }
 
     pub fn get_bytes_mut(&mut self, offset: u32, size: u32) -> &mut [u8] {
+        if offset == 0 {
+            return &mut [] as &mut [u8];
+        }
         &mut self.buf[offset as usize..(offset + size) as usize]
     }
 
     pub fn get_pointer_mut(&mut self, offset: u32) -> *mut Node {
+        if offset == 0 {
+            return ptr::null_mut();
+        }
         let pointer = &mut self.buf[offset as usize] as *mut u8;
         pointer.cast()
     }
@@ -72,7 +77,7 @@ impl Arena {
             return 0;
         }
 
-        let zero = self.get_pointer_mut(0).as_const();
+        let zero = &mut self.buf[0] as *mut u8;
         (node.addr() - zero.addr()) as u32
     }
 }
@@ -117,7 +122,7 @@ mod tests {
         let mut handles = Vec::with_capacity(10);
         let barrier = Arc::new(Barrier::new(10));
 
-        for _ in 0..10 {
+        for _ in 0..30 {
             let c = Arc::clone(&barrier);
             handles.push(thread::spawn(move || unsafe {
                 println!("before wait");
@@ -138,7 +143,7 @@ mod tests {
         }
 
         unsafe {
-            assert_eq!(u16::MAX as u32 * 10 + 1, a.as_ref().unwrap().size());
+            assert_eq!(u16::MAX as u32 * 30 + 1, a.as_ref().unwrap().size());
             assert_eq!(u32::MAX, a.as_ref().unwrap().capacity());
         }
     }

@@ -131,19 +131,19 @@ impl Skiplist {
         Ok(skl)
     }
 
-    pub fn get_next_mut(&mut self, node: Unique<Node>, h: usize) -> Unique<Node> {
+    pub fn get_next_mut(&mut self, node: Unique<Node>, h: usize) -> Option<Unique<Node>> {
         unsafe {
             let offset = node.as_ref().next_offset(h);
             let next = self.arena.as_mut().get_pointer_mut(offset);
-            Unique::new(next).unwrap()
+            Unique::new(next)
         }
     }
 
-    pub fn get_prev_mut(&mut self, node: Unique<Node>, h: usize) -> Unique<Node> {
+    pub fn get_prev_mut(&mut self, node: Unique<Node>, h: usize) -> Option<Unique<Node>> {
         unsafe {
             let offset = node.as_ref().prev_offset(h);
             let prev = self.arena.as_mut().get_pointer_mut(offset);
-            Unique::new(prev).unwrap()
+            Unique::new(prev)
         }
     }
 
@@ -196,6 +196,7 @@ impl Skiplist {
                 let spl = &ins.spl[level as usize];
                 if self
                     .get_next_mut(spl.prev.unwrap(), level as usize)
+                    .unwrap()
                     .as_ptr()
                     != spl.next.unwrap().as_ptr()
                 {
@@ -245,7 +246,7 @@ impl Skiplist {
         unsafe {
             loop {
                 // Assume prev.key < key.
-                next = self.get_next_mut(prev, level);
+                next = self.get_next_mut(prev, level).unwrap();
                 if next.as_ptr() == self.tail.as_ptr() {
                     // Tail node, so done.
                     break;
@@ -330,7 +331,7 @@ impl Skiplist {
             thread::yield_now();
         }
 
-        let (node, height) = self.new_node(key, value)?;
+        let (mut node, height) = self.new_node(key, value)?;
         let node_offset =
             unsafe { self.arena.as_mut() }.get_pointer_offset(node.as_ptr().as_const());
 
@@ -375,7 +376,7 @@ impl Skiplist {
                         .arena
                         .as_mut()
                         .get_pointer_offset(next.unwrap().as_ptr());
-                    node.as_ptr().as_mut().unwrap().tower[i].init(prev_offset, next_offset);
+                    node.as_mut().tower[i].init(prev_offset, next_offset);
 
                     // Check whether next has an updated link to prev. If it does not,
                     // that can mean one of two things:
@@ -439,7 +440,7 @@ impl Skiplist {
 
                         return Err(SKLError::RecordExist);
                     }
-                    invalidate_splice = true
+                    invalidate_splice = true;
                 }
             }
         }
@@ -539,6 +540,15 @@ impl Inserter {
             height: 0,
         }
     }
+
+    pub fn add(
+        &mut self,
+        mut skl: Unique<Skiplist>,
+        key: &InternalKey,
+        value: &[u8],
+    ) -> Result<(), SKLError> {
+        unsafe { skl.as_mut().add_internal(key, value, self) }
+    }
 }
 
 impl Default for Inserter {
@@ -556,7 +566,12 @@ mod tests {
         Inserter, InternalKey, SKLError, Skiplist, INTERNAL_KEY_KIND_DELETE,
         INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET,
     };
+    use std::ptr::Unique;
     use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    const ARENA_SIZE: u32 = 1 << 20;
 
     #[test]
     fn test_make_trailer() {
@@ -729,5 +744,74 @@ mod tests {
         ITER_POOL.with_borrow(|p| assert_eq!(128, p.size()));
 
         assert!(!skl.head.as_ptr().is_null())
+    }
+
+    #[test]
+    fn test_concurrency_basic() {
+        let n = 30;
+
+        for item in [false, true].iter().enumerate() {
+            let (_, case) = item;
+            let mut skl = Skiplist::new(&mut Arena::new(ARENA_SIZE)).unwrap();
+            skl.testing = true;
+            let mut skl = Unique::from(&mut skl);
+            let mut handles = Vec::with_capacity(n);
+            let barrier = Arc::new(Barrier::new(n));
+            for j in 0..n {
+                let c = Arc::clone(&barrier);
+                handles.push(thread::spawn(move || unsafe {
+                    println!("before wait");
+                    c.wait();
+                    println!("after wait");
+                    if *case {
+                        let mut ins = Inserter::new();
+                        let _ = ins.add(skl, &make_int_key(j), format!("{:05}", j).as_bytes());
+                    } else {
+                        let _ = skl
+                            .as_mut()
+                            .add(&make_int_key(j), format!("{:05}", j).as_bytes());
+                    }
+                }));
+            }
+
+            // Wait for other threads to finish.
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            let barrier1 = Arc::new(Barrier::new(n));
+            let mut handles1 = Vec::with_capacity(n);
+            for j in 0..n {
+                let c = Arc::clone(&barrier1);
+                handles1.push(thread::spawn(move || unsafe {
+                    println!("before wait");
+                    c.wait();
+                    println!("after wait");
+                    let mut iter = skl.as_mut().iter(&[] as &[u8], &[] as &[u8]);
+                    assert!(iter
+                        .seek_ge(format!("{:05}", j).as_bytes(), false)
+                        .is_some());
+                    assert_eq!(format!("{:05}", j).as_bytes(), iter.key.user_key)
+                }));
+            }
+
+            for handle in handles1 {
+                handle.join().unwrap();
+            }
+
+            let mut iter = unsafe { skl.as_mut() }.iter(&[] as &[u8], &[] as &[u8]);
+            let mut res = 0;
+            while iter.next().is_some() {
+                res += 1;
+            }
+            assert_eq!(30, res)
+        }
+    }
+
+    fn make_int_key(i: usize) -> InternalKey {
+        InternalKey {
+            user_key: Vec::from(format!("{:05}", i)),
+            trailer: 0,
+        }
     }
 }

@@ -30,5 +30,9 @@ fn criterion_benchmark_skl_iter(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, criterion_benchmark_skl_add,criterion_benchmark_skl_iter);
+criterion_group!(
+    benches,
+    criterion_benchmark_skl_add,
+    criterion_benchmark_skl_iter
+);
 criterion_main!(benches);

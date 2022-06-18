@@ -120,10 +120,12 @@ impl Node {
 
         let node = unsafe {
             let node = arena.get_pointer_mut(node_offset);
-            node.as_mut().unwrap().key_offset = node_offset + node_size;
-            node.as_mut().unwrap().key_size = key_size;
-            node.as_mut().unwrap().value_size = value_size;
-            node.as_mut().unwrap().alloc_size = alloc_size;
+            if !node.is_null() {
+                node.as_mut().unwrap().key_offset = node_offset + node_size;
+                node.as_mut().unwrap().key_size = key_size;
+                node.as_mut().unwrap().value_size = value_size;
+                node.as_mut().unwrap().alloc_size = alloc_size;
+            }
             node
         };
 

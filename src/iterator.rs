@@ -93,7 +93,7 @@ impl Iter {
 
     pub fn first(&mut self) -> Option<(Unique<InternalKey>, &[u8])> {
         let skl = unsafe { self.list.as_mut() };
-        self.node = skl.get_next_mut(skl.head, 0);
+        self.node = skl.get_next_mut(skl.head, 0).unwrap();
 
         unsafe {
             if self.node.as_ptr() == self.list.as_ref().tail.as_ptr() {
@@ -114,7 +114,7 @@ impl Iter {
     pub fn last(&mut self) -> Option<(Unique<InternalKey>, &[u8])> {
         let skl = unsafe { self.list.as_mut() };
 
-        self.node = skl.get_prev_mut(skl.tail, 0);
+        self.node = skl.get_prev_mut(skl.tail, 0).unwrap();
 
         unsafe {
             if self.node.as_ptr() == self.list.as_ref().head.as_ptr() {
@@ -135,7 +135,7 @@ impl Iter {
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<(Unique<InternalKey>, &[u8])> {
         unsafe {
-            self.node = self.list.as_mut().get_next_mut(self.node, 0);
+            self.node = self.list.as_mut().get_next_mut(self.node, 0).unwrap();
         }
 
         unsafe {
@@ -156,7 +156,7 @@ impl Iter {
 
     pub fn prev(&mut self) -> Option<(Unique<InternalKey>, &[u8])> {
         unsafe {
-            self.node = self.list.as_mut().get_prev_mut(self.node, 0);
+            self.node = self.list.as_mut().get_prev_mut(self.node, 0).unwrap();
         }
 
         unsafe {
@@ -236,7 +236,7 @@ impl Iter {
                     // next is pointing at the target node, but we need to find previous on
                     // the bottom level.
                     unsafe {
-                        prev = self.list.as_mut().get_prev_mut(next, 0);
+                        prev = self.list.as_mut().get_prev_mut(next, 0).unwrap();
                     }
                 }
                 break;
