@@ -33,8 +33,8 @@ impl Link {
     }
 
     pub fn init(&mut self, prev_offset: u32, next_offset: u32) {
-        self.prev_offset = AtomicU32::new(prev_offset);
-        self.next_offset = AtomicU32::new(next_offset);
+        self.prev_offset.store(prev_offset, Ordering::Release);
+        self.next_offset.store(next_offset, Ordering::Release);
     }
 }
 
@@ -125,6 +125,8 @@ impl Node {
                 node.as_mut().unwrap().key_size = key_size;
                 node.as_mut().unwrap().value_size = value_size;
                 node.as_mut().unwrap().alloc_size = alloc_size;
+            } else {
+                panic!("why node null")
             }
             node
         };

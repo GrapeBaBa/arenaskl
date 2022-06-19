@@ -7,7 +7,6 @@ use lifeguard::{InitializeWith, Pool, Recycleable, Recycled};
 use std::cell::RefCell;
 use std::ptr::Unique;
 
-// thread_local!(pub static ITER_POOL:RefCell<Pool<InternalIter >> = panic!("!"));
 thread_local!(pub static ITER_POOL:RefCell<Pool<Iter >> = RefCell::new(Pool::with_size_and_max(128, 2048)));
 
 pub struct Iter {

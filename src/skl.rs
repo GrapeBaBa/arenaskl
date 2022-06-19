@@ -2,7 +2,7 @@ use crate::arena::Arena;
 use crate::iterator::{Iter, ITER_POOL};
 use crate::node;
 use crate::node::{Node, NodeError, MAX_HEIGHT};
-use lifeguard::Recycled;
+use lifeguard::{Pool, Recycled};
 use rand::RngCore;
 use std::lazy::SyncOnceCell;
 use std::ptr::Unique;
@@ -115,8 +115,12 @@ impl Skiplist {
         let tail_offset = arena.get_pointer_offset(tail.as_const());
         unsafe {
             for i in 0..MAX_HEIGHT {
-                head.as_mut().unwrap().tower[i].next_offset = AtomicU32::from(tail_offset);
-                tail.as_mut().unwrap().tower[i].prev_offset = AtomicU32::from(head_offset);
+                head.as_mut().unwrap().tower[i]
+                    .next_offset
+                    .store(tail_offset, Ordering::Release);
+                tail.as_mut().unwrap().tower[i]
+                    .prev_offset
+                    .store(head_offset, Ordering::Release);
             }
         }
 
@@ -129,6 +133,15 @@ impl Skiplist {
         };
 
         Ok(skl)
+    }
+
+    pub fn new_with_iter_pool_size(
+        arena: &mut Arena,
+        starting_size: usize,
+        max_size: usize,
+    ) -> Result<Skiplist, SKLError> {
+        ITER_POOL.replace(Pool::with_size_and_max(starting_size, max_size));
+        Self::new(arena)
     }
 
     pub fn get_next_mut(&mut self, node: Unique<Node>, h: usize) -> Option<Unique<Node>> {
@@ -567,7 +580,8 @@ mod tests {
         INTERNAL_KEY_KIND_INVALID, INTERNAL_KEY_KIND_SET,
     };
     use std::ptr::Unique;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Barrier, Condvar, Mutex};
     use std::thread;
 
     const ARENA_SIZE: u32 = 1 << 20;
@@ -742,12 +756,27 @@ mod tests {
         Iter::close(iter);
         ITER_POOL.with_borrow(|p| assert_eq!(128, p.size()));
 
-        assert!(!skl.head.as_ptr().is_null())
+        assert!(!skl.head.as_ptr().is_null());
+    }
+
+    #[test]
+    fn test_new_iter_pool_size() {
+        let mut a = Arena::new(u32::MAX);
+
+        let skl_res = Skiplist::new_with_iter_pool_size(&mut a, 2048, 2048);
+        assert!(skl_res.is_ok());
+        let mut skl = skl_res.unwrap();
+        let iter = skl.iter(&[] as &[u8], &[] as &[u8]);
+        ITER_POOL.with_borrow(|p| assert_eq!(2047, p.size()));
+        Iter::close(iter);
+        ITER_POOL.with_borrow(|p| assert_eq!(2048, p.size()));
+
+        assert!(!skl.head.as_ptr().is_null());
     }
 
     #[test]
     fn test_concurrency_basic() {
-        let n = 1000;
+        let n = 100;
 
         for item in [false, true].iter().enumerate() {
             let (_, case) = item;
@@ -780,7 +809,8 @@ mod tests {
                     assert!(iter
                         .seek_ge(format!("{:05}", j).as_bytes(), false)
                         .is_some());
-                    assert_eq!(format!("{:05}", j).as_bytes(), iter.key.user_key)
+                    assert_eq!(format!("{:05}", j).as_bytes(), iter.key.user_key);
+                    Iter::close(iter);
                 }));
             }
 
@@ -790,16 +820,172 @@ mod tests {
 
             let mut iter = unsafe { skl.as_mut() }.iter(&[] as &[u8], &[] as &[u8]);
             let mut res = 0;
-            while iter.next().is_some() {
+            while let Some(_kv) = iter.next() {
+                // let (key, _) = kv;
+                // let key = key.as_ref().user_key.as_slice();
+                // println!("{}",  std::str::from_utf8_unchecked(key));
                 res += 1;
             }
-            assert_eq!(1000, res)
+            Iter::close(iter);
+            assert_eq!(100, res)
+        }
+    }
+
+    #[test]
+    fn test_concurrency_add() {
+        let n = 100;
+
+        for item in [true, false].iter().enumerate() {
+            let (_, case) = item;
+            let mut skl = Skiplist::new(&mut Arena::new(ARENA_SIZE)).unwrap();
+            skl.testing = true;
+            let mut skl = Unique::from(&mut skl);
+            let mut handles = Vec::with_capacity(5 * n);
+            let barrier = Arc::new(Barrier::new(5 * n));
+            for _ in 0..5 {
+                for j in 0..n {
+                    let c = Arc::clone(&barrier);
+                    handles.push(thread::spawn(move || unsafe {
+                        let key = &make_int_key(j);
+                        let mut iter = skl.as_mut().iter(&[] as &[u8], &[] as &[u8]);
+                        c.wait();
+                        if *case {
+                            let mut ins = Inserter::new();
+                            let res = ins.add(skl, key, format!("{:05}", j).as_bytes());
+                            if res.is_ok() {
+                                assert!(iter.seek_ge(key.user_key.as_slice(), false).is_some());
+                                assert_eq!(key.user_key, iter.key.user_key);
+                                assert_eq!(key.trailer, iter.key.trailer);
+                            }
+                        } else {
+                            let res = skl.as_mut().add(key, format!("{:05}", j).as_bytes());
+                            if res.is_ok() {
+                                assert!(iter.seek_ge(key.user_key.as_slice(), false).is_some());
+                                assert_eq!(key.user_key, iter.key.user_key);
+                                assert_eq!(key.trailer, iter.key.trailer);
+                            }
+                        }
+                        Iter::close(iter);
+                    }));
+                }
+            }
+
+            // Wait for other threads to finish.
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            let mut handles1 = Vec::with_capacity(n);
+            for j in 0..n {
+                handles1.push(thread::spawn(move || unsafe {
+                    let mut iter = skl.as_mut().iter(&[] as &[u8], &[] as &[u8]);
+                    assert!(iter
+                        .seek_ge(format!("{:05}", j).as_bytes(), false)
+                        .is_some());
+                    assert_eq!(format!("{:05}", j).as_bytes(), iter.key.user_key);
+                    Iter::close(iter);
+                }));
+            }
+
+            for handle in handles1 {
+                handle.join().unwrap();
+            }
+
+            let mut iter = unsafe { skl.as_mut() }.iter(&[] as &[u8], &[] as &[u8]);
+            let mut res = 0;
+
+            while let Some(_kv) = iter.next() {
+                // let (key, _) = kv;
+                // let key = key.as_ref().user_key.as_slice();
+                // println!("{}", std::str::from_utf8_unchecked(key));
+                res += 1;
+            }
+            Iter::close(iter);
+            assert_eq!(100, res)
+        }
+    }
+
+    #[test]
+    fn test_concurrency_one_key() {
+        let n = 100;
+        let key = "thekey".as_bytes();
+        for item in [true, false].iter().enumerate() {
+            let (_, case) = item;
+            let mut skl = Skiplist::new(&mut Arena::new(ARENA_SIZE)).unwrap();
+            skl.testing = true;
+            let mut skl = Unique::from(&mut skl);
+            let mut handles = Vec::with_capacity(n);
+            let pair = Arc::new((Mutex::new(false), Condvar::new()));
+            for j in 0..n {
+                let pair_c = pair.clone();
+                handles.push(thread::spawn(move || unsafe {
+                    let i_key = make_i_key("thekey");
+                    if *case {
+                        let mut ins = Inserter::new();
+                        let _ = ins.add(skl, &i_key, format!("{:05}", j).as_bytes());
+                    } else {
+                        let _ = skl.as_mut().add(&i_key, format!("{:05}", j).as_bytes());
+                    }
+                    let (lock, cvar) = &*pair_c;
+                    let mut written = lock.lock().unwrap();
+                    *written = true;
+                    // We notify the condvar that the value has changed.
+                    cvar.notify_all();
+                }));
+            }
+
+            // Wait for other threads to finish.
+            // for handle in handles {
+            //     handle.join().unwrap();
+            // }
+            let (lock, cvar) = &*pair;
+            let mut written = lock.lock().unwrap();
+            while !*written {
+                written = cvar.wait(written).unwrap();
+            }
+
+            let mut handles1 = Vec::with_capacity(n);
+            let saw_value = Arc::new(AtomicU32::default());
+            for _ in 0..n {
+                let saw_value_c = saw_value.clone();
+                handles1.push(thread::spawn(move || unsafe {
+                    let mut iter = skl.as_mut().iter(&[] as &[u8], &[] as &[u8]);
+                    assert!(iter.seek_ge(key, false).is_some());
+                    assert_eq!(key, iter.key.user_key);
+                    saw_value_c.fetch_add(1, Ordering::AcqRel);
+                    Iter::close(iter);
+                }));
+            }
+
+            for handle in handles1 {
+                handle.join().unwrap();
+            }
+
+            let mut iter = unsafe { skl.as_mut() }.iter(&[] as &[u8], &[] as &[u8]);
+            let mut res = 0;
+
+            while let Some(_kv) = iter.next() {
+                // let (key, _) = kv;
+                // let key = key.as_ref().user_key.as_slice();
+                // println!("{}",  std::str::from_utf8_unchecked(key));
+                res += 1;
+            }
+            Iter::close(iter);
+            assert_eq!(1, res);
+            assert_eq!(100, saw_value.load(Ordering::Acquire));
         }
     }
 
     fn make_int_key(i: usize) -> InternalKey {
         InternalKey {
             user_key: Vec::from(format!("{:05}", i)),
+            trailer: 0,
+        }
+    }
+
+    fn make_i_key(s: &str) -> InternalKey {
+        InternalKey {
+            user_key: Vec::from(s),
             trailer: 0,
         }
     }

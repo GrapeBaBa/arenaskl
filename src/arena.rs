@@ -160,4 +160,40 @@ mod tests {
         let exp_node2_offset = a.get_pointer_offset(node2_p);
         assert_eq!(exp_node2_offset, node2_offset)
     }
+
+    #[test]
+    fn test_concurrency_pointer_offset() {
+        let a = &mut Arena::new(u32::MAX) as *mut Arena;
+        let d = Unique::new(a);
+        let mut handles = Vec::with_capacity(10);
+        let barrier = Arc::new(Barrier::new(10));
+
+        for _ in 0..30 {
+            let c = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || unsafe {
+                println!("before wait");
+                c.wait();
+                println!("after wait");
+                let (e, f) = d.unwrap().as_ref().alloc(u16::MAX as u32, 0, 0).unwrap();
+                println!("{},{}", e, f);
+                assert_eq!(
+                    u16::MAX,
+                    d.unwrap().as_mut().get_bytes_mut(e, f).len() as u16
+                );
+                let node1_p = d.unwrap().as_mut().get_pointer_mut(e);
+                let exp_node1_offset = d.unwrap().as_mut().get_pointer_offset(node1_p);
+                assert_eq!(exp_node1_offset, e);
+            }));
+        }
+
+        // Wait for other threads to finish.
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        unsafe {
+            assert_eq!(u16::MAX as u32 * 30 + 1, a.as_ref().unwrap().size());
+            assert_eq!(u32::MAX, a.as_ref().unwrap().capacity());
+        }
+    }
 }
