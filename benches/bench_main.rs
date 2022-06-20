@@ -1,6 +1,9 @@
 #![feature(test)]
+#![feature(ptr_internals)]
 
+extern crate num_cpus;
 extern crate test;
+extern crate threadpool;
 
 use criterion::criterion_main;
 

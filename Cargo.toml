@@ -12,6 +12,8 @@ lifeguard = "0.6.1"
 
 [dev-dependencies]
 criterion = "0.3.5"
+threadpool = "1.0"
+num_cpus = "1.0"
 
 [[bench]]
 name = "bench_main"

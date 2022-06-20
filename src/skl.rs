@@ -3,7 +3,7 @@ use crate::iterator::{Iter, ITER_POOL};
 use crate::node;
 use crate::node::{Node, NodeError, MAX_HEIGHT};
 use lifeguard::{Pool, Recycled};
-use rand::RngCore;
+use rand::Rng;
 use std::lazy::SyncOnceCell;
 use std::ptr::Unique;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -501,12 +501,11 @@ impl Skiplist {
     }
 
     fn random_height() -> u32 {
-        let rnd = rand::thread_rng().next_u32();
+        let rnd = rand::thread_rng().gen::<u32>();
 
         let mut h = 1u32;
         let a = get_probabilities();
-        let p = a[h as usize];
-        while h < node::MAX_HEIGHT as u32 && rnd <= p {
+        while h < node::MAX_HEIGHT as u32 && rnd <= a[h as usize] {
             h += 1;
         }
         h
@@ -610,6 +609,7 @@ mod tests {
     #[test]
     fn test_random_height() {
         let h = Skiplist::random_height();
+        println!("{}", h);
         assert!(h >= 1 && h <= 20);
     }
 
@@ -780,7 +780,8 @@ mod tests {
 
         for item in [false, true].iter().enumerate() {
             let (_, case) = item;
-            let mut skl = Skiplist::new(&mut Arena::new(ARENA_SIZE)).unwrap();
+            let mut a = Arena::new(ARENA_SIZE);
+            let mut skl = Skiplist::new(&mut a).unwrap();
             skl.testing = true;
             let mut skl = Unique::from(&mut skl);
             let mut handles = Vec::with_capacity(n);
@@ -837,7 +838,8 @@ mod tests {
 
         for item in [true, false].iter().enumerate() {
             let (_, case) = item;
-            let mut skl = Skiplist::new(&mut Arena::new(ARENA_SIZE)).unwrap();
+            let mut a = Arena::new(u32::MAX);
+            let mut skl = Skiplist::new(&mut a).unwrap();
             skl.testing = true;
             let mut skl = Unique::from(&mut skl);
             let mut handles = Vec::with_capacity(5 * n);
@@ -911,7 +913,8 @@ mod tests {
         let key = "thekey".as_bytes();
         for item in [true, false].iter().enumerate() {
             let (_, case) = item;
-            let mut skl = Skiplist::new(&mut Arena::new(ARENA_SIZE)).unwrap();
+            let mut a = Arena::new(u32::MAX);
+            let mut skl = Skiplist::new(&mut a).unwrap();
             skl.testing = true;
             let mut skl = Unique::from(&mut skl);
             let mut handles = Vec::with_capacity(n);
